@@ -18,22 +18,34 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
   
   vec4 sunDirection;
   vec4 sunColor;
+
+  vec4 sunParams;
+  vec4 sunScreen;
   
   PointLight pointLights[10];
   int numLights;
+
+  float autoExposure;
 } ubo;
 
 layout(set = 0, binding = 2) uniform samplerCube skyboxMap;
 
 void main() {
     vec3 dir = normalize(vDir);
-    //dir.y = -dir.y;
-    //dir.z = -dir.z;
+
+    vec3 sunDir = normalize(-ubo.sunDirection.xyz);
     vec4 texColor = texture(skyboxMap, dir);
 
-    if (texColor.a < 0.01) {
-        texColor = vec4(0.1, 0.4, 0.8, 1.0);
-    }
+    float sunDot = dot(dir, sunDir);
+
+    float sunSize = 0.995;
+    float core = smoothstep(sunSize, 1.0, sunDot);
+    float glow = smoothstep(0.85, 1.0, sunDot);
+
+    vec3 sunCol = ubo.sunColor.rgb * ubo.sunColor.a;
+
+    texColor.rgb += core * sunCol * 5.0;
+    texColor.rgb += glow * sunCol * 0.5;
 
     outColor = texColor;
 }

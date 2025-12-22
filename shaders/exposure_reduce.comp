@@ -1,0 +1,32 @@
+#version 450
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (binding = 0) uniform sampler2D hdrImage;
+
+layout (std430, binding = 1) buffer ExposureData {
+    int logLumSumScaled;
+    int   pixelCount;
+};
+
+const float SCALE = 1048576.0;
+
+void main()
+{
+    ivec2 size = textureSize(hdrImage, 0);
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+
+    if (pix.x >= size.x || pix.y >= size.y)
+        return;
+
+    vec3 hdr = texture(hdrImage, vec2(pix) / vec2(size)).rgb;
+
+    float lum = max(dot(hdr, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+
+    float logLum = log(lum);
+
+    int scaled = int(logLum * SCALE);
+
+    atomicAdd(logLumSumScaled, scaled);
+    atomicAdd(pixelCount, 1);
+}

@@ -6,8 +6,6 @@
 
 namespace enginev {
 
-    // *************** Descriptor Set Layout Builder *********************
-
     DescriptorSetLayout::Builder& DescriptorSetLayout::Builder::addBinding(
         uint32_t binding,
         VkDescriptorType descriptorType,
@@ -26,8 +24,6 @@ namespace enginev {
     std::unique_ptr<DescriptorSetLayout> DescriptorSetLayout::Builder::build() const {
         return std::make_unique<DescriptorSetLayout>(device, bindings);
     }
-
-    // *************** Descriptor Set Layout *********************
 
     DescriptorSetLayout::DescriptorSetLayout(
         Device& lveDevice, std::unordered_map<uint32_t, VkDescriptorSetLayoutBinding> bindings)
@@ -55,8 +51,6 @@ namespace enginev {
         vkDestroyDescriptorSetLayout(device.device(), descriptorSetLayout, nullptr);
     }
 
-    // *************** Descriptor Pool Builder *********************
-
     DescriptorPool::Builder& DescriptorPool::Builder::addPoolSize(
         VkDescriptorType descriptorType, uint32_t count) {
         poolSizes.push_back({ descriptorType, count });
@@ -76,8 +70,6 @@ namespace enginev {
     std::unique_ptr<DescriptorPool> DescriptorPool::Builder::build() const {
         return std::make_unique<DescriptorPool>(device, maxSets, poolFlags, poolSizes);
     }
-
-    // *************** Descriptor Pool *********************
 
     DescriptorPool::DescriptorPool(
         Device& lveDevice,
@@ -110,8 +102,6 @@ namespace enginev {
         allocInfo.pSetLayouts = &descriptorSetLayout;
         allocInfo.descriptorSetCount = 1;
 
-        // Might want to create a "DescriptorPoolManager" class that handles this case, and builds
-        // a new pool whenever an old pool fills up. But this is beyond our current scope
         if (vkAllocateDescriptorSets(device.device(), &allocInfo, &descriptor) != VK_SUCCESS) {
             return false;
         }
@@ -129,8 +119,6 @@ namespace enginev {
     void DescriptorPool::resetPool() {
         vkResetDescriptorPool(device.device(), descriptorPool, 0);
     }
-
-    // *************** Descriptor Writer *********************
 
     DescriptorWriter::DescriptorWriter(DescriptorSetLayout& setLayout, DescriptorPool& pool)
         : setLayout{ setLayout }, pool{ pool } {}

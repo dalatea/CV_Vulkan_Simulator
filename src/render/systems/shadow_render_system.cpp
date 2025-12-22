@@ -60,8 +60,14 @@ namespace enginev {
         pipelineConfig.renderPass                     = renderPass;
         pipelineConfig.pipelineLayout                 = pipelineLayout;
 
-        // Можно включить front-face culling, чтобы не рисовать задние полигоны
-        pipelineConfig.rasterizationInfo.cullMode = VK_CULL_MODE_BACK_BIT;
+        pipelineConfig.rasterizationInfo.cullMode = VK_CULL_MODE_NONE;
+        pipelineConfig.rasterizationInfo.depthBiasEnable = VK_FALSE;
+        //pipelineConfig.rasterizationInfo.depthBiasConstantFactor = 1.0f;
+        //pipelineConfig.rasterizationInfo.depthBiasSlopeFactor = 1.5f;
+        //pipelineConfig.rasterizationInfo.depthBiasClamp = 0.0f;
+        
+        pipelineConfig.rasterizationInfo.frontFace = VK_FRONT_FACE_CLOCKWISE;
+
         pipelineConfig.depthStencilInfo.depthTestEnable  = VK_TRUE;
         pipelineConfig.depthStencilInfo.depthWriteEnable = VK_TRUE;
         pipelineConfig.depthStencilInfo.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;

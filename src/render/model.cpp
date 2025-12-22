@@ -41,6 +41,39 @@ namespace enginev {
 		return std::make_unique<Model>(device, builder);
 	}
 
+	std::shared_ptr<Model> Model::createSkyboxCube(Device& device) {
+		static const std::vector<glm::vec3> CUBE_POSITIONS = {
+        {-1, -1, -1}, {1, -1, -1}, {1,  1, -1}, {-1,  1, -1},  // back
+        {-1, -1,  1}, {1, -1,  1}, {1,  1,  1}, {-1,  1,  1}   // front
+    	};
+
+		static const std::vector<uint32_t> CUBE_INDICES = {
+			0,1,2, 2,3,0,  // back
+			4,5,6, 6,7,4,  // front
+			0,4,7, 7,3,0,  // left
+			1,5,6, 6,2,1,  // right
+			3,2,6, 6,7,3,  // top
+			0,1,5, 5,4,0   // bottom
+		};
+
+		Builder builder{};
+
+		builder.vertices.reserve(CUBE_POSITIONS.size());
+		for (auto &p : CUBE_POSITIONS) {
+			Vertex v{};
+			v.position = p;
+			v.color = {1, 1, 1};
+			v.normal = {0, 0, 0};
+			v.uv = {0, 0};
+			builder.vertices.push_back(v);
+		}
+
+		builder.indices = CUBE_INDICES;
+
+		return std::make_shared<Model>(device, builder);
+
+	}
+
 	void Model::createVertexBuffers(const std::vector<Vertex>& vertices) {
 		vertexCount = static_cast<uint32_t>(vertices.size());
 		assert(vertexCount >= 3 && "Vertex count must be at least 3");

@@ -46,6 +46,7 @@ namespace enginev {
 
 		void bind(VkCommandBuffer commandBuffer);
 		void draw(VkCommandBuffer commandBuffer);
+		static std::shared_ptr<Model> createSkyboxCube(Device& device);
 
 	private:
 		void createVertexBuffers(const std::vector<Vertex>& vertices);

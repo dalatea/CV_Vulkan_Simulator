@@ -56,6 +56,7 @@ namespace enginev {
         Pipeline::defaultPipelineConfigInfo(pipelineConfig);
         pipelineConfig.renderPass = renderPass;
         pipelineConfig.pipelineLayout = pipelineLayout;
+        pipelineConfig.rasterizationInfo.frontFace = VK_FRONT_FACE_CLOCKWISE;
         pipeline = std::make_unique<Pipeline>(
             device,
             "../shaders/shader.vert.spv",

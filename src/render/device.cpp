@@ -4,6 +4,7 @@
 #include <iostream>
 #include <set>
 #include <unordered_set>
+#include <stdexcept>
 
 namespace enginev {
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
@@ -54,7 +55,6 @@ namespace enginev {
         barrier.subresourceRange.baseArrayLayer = 0;
         barrier.subresourceRange.layerCount     = layerCount;
 
-        // Определяем aspectMask: depth vs color
         if (format == VK_FORMAT_D32_SFLOAT ||
             format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
             format == VK_FORMAT_D24_UNORM_S8_UINT) {
@@ -75,7 +75,6 @@ namespace enginev {
         if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
             newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
 
-            // undefined → transfer dst (загрузка текстуры)
             barrier.srcAccessMask = 0;
             barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
@@ -85,7 +84,6 @@ namespace enginev {
         } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
                 newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
 
-            // transfer dst → shader read (готово к выборке в шейдере)
             barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -95,7 +93,6 @@ namespace enginev {
         } else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
                 newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
 
-            // undefined → depth attachment (для depth/shadow map)
             barrier.srcAccessMask = 0;
             barrier.dstAccessMask =
                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
@@ -103,6 +100,36 @@ namespace enginev {
 
             srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
             dstStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+
+        } else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
+                   newLayout == VK_IMAGE_LAYOUT_GENERAL) {
+
+            // Для storage image перед compute
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+
+            srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+        } else if (oldLayout == VK_IMAGE_LAYOUT_GENERAL &&
+                   newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+
+            // После compute, чтобы можно было сэмплить во фрагменте
+            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+            srcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+        } else if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+                   newLayout == VK_IMAGE_LAYOUT_GENERAL) {
+
+            // Если на следующем кадре снова пишем compute
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+
+            srcStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
         } else {
             throw std::invalid_argument("unsupported layout transition in Device::transitionImageLayout");
@@ -237,6 +264,10 @@ namespace enginev {
         VkPhysicalDeviceFeatures deviceFeatures = {};
         deviceFeatures.samplerAnisotropy = VK_TRUE;
 
+        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloatFeatures{};
+        atomicFloatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+        atomicFloatFeatures.shaderBufferFloat32Atomics = VK_TRUE;
+        atomicFloatFeatures.shaderBufferFloat32AtomicAdd = VK_TRUE;
         VkDeviceCreateInfo createInfo = {};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 
@@ -246,6 +277,8 @@ namespace enginev {
         createInfo.pEnabledFeatures = &deviceFeatures;
         createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
         createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+
+        createInfo.pNext = &atomicFloatFeatures;
 
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());

@@ -25,9 +25,14 @@ layout(std140, set = 0, binding = 0) uniform GlobalUbo {
   
   vec4 sunDirection;
   vec4 sunColor;
+
+  vec4 sunParams;
+  vec4 sunScreen;
   
   PointLight pointLights[10];
   int numLights;
+
+  float autoExposure;
 } ubo;
 
 layout(push_constant) uniform Push {

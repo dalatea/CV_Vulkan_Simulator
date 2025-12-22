@@ -145,6 +145,7 @@ find_program(GLSL_VALIDATOR
 file(GLOB_RECURSE GLSL_SOURCE_FILES
   "${PROJECT_SOURCE_DIR}/shaders/*.frag"
   "${PROJECT_SOURCE_DIR}/shaders/*.vert"
+  "${PROJECT_SOURCE_DIR}/shaders/*.comp"
 )
 
 foreach(GLSL ${GLSL_SOURCE_FILES})

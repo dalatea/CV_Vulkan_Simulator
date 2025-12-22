@@ -104,4 +104,4 @@ namespace enginev {
         inverseViewMatrix[3][1] = position.y;
         inverseViewMatrix[3][2] = position.z;
     }
-}  // namespace lve
+}

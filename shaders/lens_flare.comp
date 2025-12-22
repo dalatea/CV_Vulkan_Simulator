@@ -1,0 +1,269 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// 0) êóäà ïèøåì PSF/flare
+layout(set = 0, binding = 0, rgba16f) uniform image2D flareImg;
+
+// 1) surfaces
+struct LensSurface {
+    float radius;
+    float z;
+    float ior;
+    float aperture;
+    int   isStop;
+};
+
+layout(set = 0, binding = 1) readonly buffer Surfaces {
+    LensSurface s[];
+};
+
+// 2) params
+layout(set = 0, binding = 2) uniform LensParams {
+    int   surfaceCount;
+    float sensorZ;
+    float sensorW;
+    float sensorH;
+    float pad0;
+} lp;
+
+// 3) GlobalUbo (òû óæå çàïîëíÿåøü sunScreen/sunColor)
+layout(set = 0, binding = 3) uniform GlobalUbo {
+    mat4 projection;
+    mat4 view;
+    mat4 invView;
+    mat4 lightViewProj;
+
+    vec4 ambientLightColor;
+
+    vec4 sunParams;
+    vec4 sunScreen; // xy sunUV, z visibility, w scale
+    
+
+} ubo;
+
+
+// --------------------- math ---------------------
+
+bool refractRay(in vec3 I, in vec3 N, float eta, out vec3 T) {
+    // I íàïðàâëåí Â ÏÎÂÅÐÕÍÎÑÒÜ
+    float cosi = clamp(dot(-I, N), -1.0, 1.0);
+    float k = 1.0 - eta * eta * (1.0 - cosi * cosi);
+    if (k < 0.0) return false;
+    T = normalize(eta * I + (eta * cosi - sqrt(k)) * N);
+    return true;
+}
+
+vec3 reflectRay(vec3 I, vec3 N) {
+    return normalize(I - 2.0 * dot(I, N) * N);
+}
+
+// ïåðåñå÷åíèå ëó÷à ñ ñôåðè÷åñêîé ïîâåðõíîñòüþ
+// óïðîùžííî: îñü Z, öåíòð ñôåðû íà îñè
+bool intersectSphereSurface(vec3 ro, vec3 rd, float radius, float zSurf, out vec3 hitPos, out vec3 N) {
+    // Åñëè radius îãðîìåí -> ïëîñêîñòü
+    float R = radius;
+
+    // Öåíòð ñôåðû íà îñè Z:
+    // Â ïðîñòåéøåé ìîäåëè ñ÷èòàåì öåíòð = (0,0, zSurf + R)
+    vec3 C = vec3(0.0, 0.0, zSurf + R);
+
+    vec3 oc = ro - C;
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - R * R;
+    float disc = b * b - c;
+    if (disc < 0.0) return false;
+
+    float t = -b - sqrt(disc);
+    if (t < 0.0) t = -b + sqrt(disc);
+    if (t < 0.0) return false;
+
+    hitPos = ro + rd * t;
+    N = normalize(hitPos - C);
+
+    // Íîðìàëü äîëæíà ñìîòðåòü íàðóæó ëèíçû.
+    // Äëÿ êîððåêòíîñòè ìîæíî ïåðåâîðà÷èâàòü ïî sign(radius)
+    if (R < 0.0) N = -N;
+
+    return true;
+}
+
+// àïåðòóðíûé êëèï
+bool passAperture(vec3 p, float apertureRadius) {
+    return (p.x * p.x + p.y * p.y) <= (apertureRadius * apertureRadius);
+}
+
+// --------------------- main ---------------------
+
+void main() {
+    imageStore(flareImg, ivec2(gl_GlobalInvocationID.xy), vec4(0,1,0,1));
+    /*ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(flareImg);
+    if (pix.x >= size.x || pix.y >= size.y) 
+    {
+    	imageStore(flareImg, pix, vec4(
+    	1,
+    	0,
+        0.0,
+        1.0
+    ));
+    return;
+}
+    // î÷èùàåì flareImg îäèí ðàç äî dispatch (ëó÷øå îòäåëüíûì clear)
+    // çäåñü íå ÷èñòèì.
+
+    // åñëè ñîëíöå íå âèäíî - íè÷åãî
+    //if (ubo.sunScreen.z < 0.5) return;
+
+    // screen uv òåêóùåãî ïèêñåëÿ flareTex
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+
+    // ïîçèöèÿ ñîëíöà íà ýêðàíå
+    vec2 sunUV = ubo.sunScreen.xy;
+
+    // Ðàäèóñ ñîëíöà â screen space (ïðèáëèçü)
+    float sunR = 0.02; // ìîæíî ïåðåäàòü ÷åðåç UBO
+
+    // Ïðîâåðÿåì, ÷òî ýòîò flare-ïèêñåëü ïîïàäàåò â îáëàñòü îêîëî ñîëíöà,
+    // ÷òîáû íå òðàññèðîâàòü âåçäå.
+    float dSun = length(uv - sunUV);
+    //if (dSun > 0.25) return; // îãðàíè÷åíèå îáëàñòè ðàñ÷žòà
+
+    // ---------------------------
+    // Ìîíòå-Êàðëî: èñòî÷íèêè íà äèñêå ñîëíöà + òî÷êè àïåðòóðû
+    // ---------------------------
+
+    const int SUN_SAMPLES = 8;
+    const int AP_SAMPLES = 16;
+
+    vec3 accum = vec3(0.0);
+
+    // Ïðîñòåíüêèé hash
+    uint seed = uint(pix.x * 1973 + pix.y * 9277) ^ 0x68bc21u;
+
+    float sunIntensity = ubo.sunColor.a; // êàê òû õðàíèøü intensity
+    vec3  sunCol = ubo.sunColor.rgb;
+
+    for (int si = 0; si < SUN_SAMPLES; ++si) {
+        // jitter ïî ñîëíöó
+        float a = float(si) / float(SUN_SAMPLES) * 6.28318;
+        float r = sunR * (0.3 + 0.7 * fract(sin(float(seed + si) * 12.9898) * 43758.5453));
+        vec2 sunPoint = sunUV + vec2(cos(a), sin(a)) * r;
+
+        // ëó÷è ñ÷èòàåì â "îïòè÷åñêîì" ïðîñòðàíñòâå
+        // Â óïðîùžííîé ìîäåëè:
+        // ýêðàí -> íàïðàâëåíèå âõîäÿùåãî ëó÷à ~ èç áåñêîíå÷íîñòè.
+        // Äëÿ ñîëíöà, êàê äàëüíåãî èñòî÷íèêà:
+        // áóäåì èñïîëüçîâàòü íàïðàâëåíèå ïî sunDirection.
+        vec3 dirFromSun = normalize(-ubo.sunDirection.xyz); // êóäà ëåòèò ñâåò
+
+        for (int ai = 0; ai < AP_SAMPLES; ++ai) {
+            // ñýìïë àïåðòóðû (êðóã)
+            float u = fract(sin(float(seed + ai * 13u) * 12.9898) * 43758.5453);
+            float v = fract(sin(float(seed + ai * 29u) * 78.233) * 12345.6789);
+            float ang = 6.28318 * u;
+            float rad = sqrt(v);
+
+            // íàéäžì stop ïîâåðõíîñòü
+            float apR = 0.01;
+            float apZ = 0.0;
+            for (int k = 0; k < lp.surfaceCount; ++k) {
+                if (s[k].isStop == 1) {
+                    apR = s[k].aperture;
+                    apZ = s[k].z;
+                    break;
+                }
+            }
+
+            vec2 apXY = vec2(cos(ang), sin(ang)) * rad * apR;
+
+            // Ñòàðòóåì ëó÷ íà ïëîñêîñòè ñòîïà
+            vec3 ro = vec3(apXY, apZ);
+            vec3 rd = dirFromSun;
+
+            // ---------------------------
+            // Ïðîõîä âïåðžä ïî ëèíçàì
+            // ---------------------------
+            float n1 = 1.0; // âîçäóõ
+
+            bool killed = false;
+
+            for (int k = 0; k < lp.surfaceCount; ++k) {
+                vec3 hp, N;
+                if (!intersectSphereSurface(ro, rd, s[k].radius, s[k].z, hp, N)) {
+                    killed = true; break;
+                }
+
+                // àïåðòóðíûé êëèï íà stop
+                if (s[k].isStop == 1) {
+                    if (!passAperture(hp, s[k].aperture)) {
+                        killed = true; break;
+                    }
+                }
+
+                float n2 = s[k].ior;
+                vec3 refr;
+                float eta = n1 / n2;
+
+                if (!refractRay(rd, N, eta, refr)) {
+                    killed = true; break;
+                }
+
+                ro = hp + refr * 1e-4;
+                rd = refr;
+                n1 = n2;
+            }
+
+            if (killed) continue;
+
+            // ---------------------------
+            // 1 âíóòðåííåå îòðàæåíèå (ghost path)
+            // ---------------------------
+            // Áåðžì îäíó "ÿðêóþ" ïîâåðõíîñòü äëÿ îòðàæåíèÿ.
+            // Äëÿ MVP: îòðàæàåìñÿ íà ïðåäïîñëåäíåé ïîâåðõíîñòè è èäžì îáðàòíî.
+            int g = max(lp.surfaceCount - 2, 0);
+
+            {
+                vec3 hp, N;
+                if (intersectSphereSurface(ro, rd, s[g].radius, s[g].z, hp, N)) {
+                    vec3 rdir = reflectRay(rd, N);
+
+                    // Âîçâðàò íàçàä ÷åðåç íåñêîëüêî ïîâåðõíîñòåé (óïðîùžííî)
+                    vec3 rro = hp + rdir * 1e-4;
+                    vec3 rrd = rdir;
+
+                    // Ïûòàåìñÿ äîéòè äî ñåíñîðà ïëîñêîñòüþ z = sensorZ
+                    float t = (lp.sensorZ - rro.z) / rrd.z;
+                    if (t > 0.0) {
+                        vec3 sp = rro + rrd * t;
+
+                        // Êîíâåðòàöèÿ ñåíñîðíûõ êîîðäèíàò â uv flareImg
+                        // sp.x, sp.y â ìåòðàõ/óñëîâíûõ åäèíèöàõ
+                        vec2 suv = vec2(
+                            0.5 + sp.x / lp.sensorW,
+                            0.5 + sp.y / lp.sensorH
+                        );
+
+                        // âêëàä â òåêóùèé ïèêñåëü flareImg
+                        float w = 1.0 / float(SUN_SAMPLES * AP_SAMPLES);
+                        float fall = exp(-dSun * 8.0);
+
+                        // ïðîñòàÿ îöåíêà îòðàæàòåëüíîñòè (êîíñòàíòà)
+                        float refl = 0.04;
+
+                        // åñëè uv áëèçîê ê íàøåìó ïèêñåëþ
+                        float d = length(suv - uv);
+                        float kernel = exp(-d * 200.0);
+
+                        accum += sunCol * sunIntensity * refl * fall * kernel * w;
+                    }
+                }
+            }
+        }
+    }
+
+    if (length(accum) > 0.0) {
+        vec4 prev = imageLoad(flareImg, pix);
+        imageStore(flareImg, pix, prev + vec4(accum, 1.0));
+    }*/
+}

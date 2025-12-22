@@ -5,9 +5,13 @@
 #include "point_light_system.hpp"
 #include "shadow_render_system.hpp"
 #include "skybox_render_system.hpp"
-#include "camera.hpp"
 #include "buffer.hpp"
 #include "ros_bridge.hpp"
+#include "post_process_render_system.hpp"
+#include "bright_render_system.hpp"
+#include "blur_render_system.hpp"
+#include "exposure_reduce_system.hpp"
+#include "exposure_update_system.hpp"
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -22,17 +26,32 @@
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <cstdlib>  
+#include <iostream>  
+#include <cmath>
 
 
 namespace cvsim {
 
-    SimApp::SimApp() { 
+
+    SimApp::SimApp()
+        : SimApp(StressConfig{}) {}   
+
+    SimApp::SimApp(const StressConfig& stressCfg)
+        : stressCfg_{ stressCfg } {
+
         globalPool =
             DescriptorPool::Builder(device)
-            .setMaxSets(SwapChain::MAX_FRAMES_IN_FLIGHT)
-            .addPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, SwapChain::MAX_FRAMES_IN_FLIGHT)
-            .addPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, SwapChain::MAX_FRAMES_IN_FLIGHT * 2)
+            .setMaxSets(SwapChain::MAX_FRAMES_IN_FLIGHT * 10)
+            .addPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, SwapChain::MAX_FRAMES_IN_FLIGHT * 6)
+            .addPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, SwapChain::MAX_FRAMES_IN_FLIGHT * 12)
+            .addPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, SwapChain::MAX_FRAMES_IN_FLIGHT * 2)
+            .addPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, SwapChain::MAX_FRAMES_IN_FLIGHT * 10)
             .build();
+
+        scenePass = std::make_unique<enginev::ScenePass>(device);
+        bloomPass = std::make_unique<enginev::BloomPass>(device);
+        lensFlarePass = std::make_unique<LensFlarePass>(device);
 
         createShadowResources();
         createSkyboxCubemap();
@@ -41,6 +60,17 @@ namespace cvsim {
     }
 
     SimApp::~SimApp() {}
+
+    std::shared_ptr<Model> SimApp::getModelCached_(const std::string& modelPath) {
+        auto it = modelCache_.find(modelPath);
+        if (it != modelCache_.end()) {
+            return it->second;
+        }
+
+        std::shared_ptr<Model> model = {Model::createModelFromFile(device, modelPath)};
+        modelCache_.emplace(modelPath, model);
+        return model;
+    }
 
     void SimApp::destroyShadowResources() {
         if (shadowSampler != VK_NULL_HANDLE) {
@@ -100,6 +130,77 @@ namespace cvsim {
             uboBuffers[i]->map();
         }
         
+        std::vector<LensSurfaceGPU> lensSurfacesCpu = {
+            // radius,   z,     ior,  aperture, isStop
+            {  0.050f,  0.000f, 1.5f, 0.020f, 0, 0,0,0 }, // front element
+            { -0.050f,  0.010f, 1.0f, 0.020f, 0, 0,0,0 }, // exit of element (air)
+            {  0.030f,  0.020f, 1.6f, 0.018f, 0, 0,0,0 },
+            { -0.030f,  0.028f, 1.0f, 0.018f, 0, 0,0,0 },
+            {  0.0f,    0.035f, 1.0f, 0.012f, 1, 0,0,0 }, // aperture stop
+            {  0.040f,  0.040f, 1.5f, 0.020f, 0, 0,0,0 },
+            { -0.040f,  0.050f, 1.0f, 0.020f, 0, 0,0,0 },
+        };
+
+        // storage buffer с поверхностями 
+        auto lensSurfacesBuffer = std::make_unique<Buffer>(
+            device,
+            sizeof(enginev::LensSurfaceGPU),
+            static_cast<uint32_t>(lensSurfacesCpu.size()),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+        lensSurfacesBuffer->map();
+        lensSurfacesBuffer->writeToBuffer(lensSurfacesCpu.data());
+        lensSurfacesBuffer->flush();
+
+        // LensParams
+        std::vector<std::unique_ptr<Buffer>> lensParamsBuffers(SwapChain::MAX_FRAMES_IN_FLIGHT);
+        for (int i = 0; i < static_cast<int>(lensParamsBuffers.size()); ++i) {
+            lensParamsBuffers[i] = std::make_unique<Buffer>(
+                device,
+                sizeof(enginev::LensParamsGPU),
+                1,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            );
+            lensParamsBuffers[i]->map();
+        }
+
+        auto exposureData = std::make_unique<Buffer>(
+                    device,
+                    sizeof(float) + sizeof(int),
+                    1,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                );
+                exposureData->map();
+
+                // initial data
+                struct {
+                    float logLumSum = 0.0f;
+                    int pixelCount = 0;
+                } expDataInit;
+                exposureData->writeToBuffer(&expDataInit);
+
+                auto exposureState = std::make_unique<Buffer>(
+                    device,
+                    sizeof(float) * 5,
+                    1,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                );
+                exposureState->map();
+
+                struct {
+                    float autoExposure = 1.0f;
+                    float targetExposure = 1.0f;
+                    float adaptionRateUp = 1.5f;
+                    float adaptionRateDown = 3.5f;
+                    float dt = 0.016f;
+                } expStateInit;
+
+                exposureState->writeToBuffer(&expStateInit);
+    
         auto globalSetLayout =
             DescriptorSetLayout::Builder(device)
             .addBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_ALL_GRAPHICS)
@@ -107,11 +208,149 @@ namespace cvsim {
             .addBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
             .build();
 
+        auto brightSetLayout =
+            DescriptorSetLayout::Builder(device)
+            .addBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+            .build();
+
+        auto blurSetLayout =
+            DescriptorSetLayout::Builder(device)
+            .addBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+            .build();
+
+        auto postSetLayout =
+            DescriptorSetLayout::Builder(device)
+            .addBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+            .addBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+            .addBinding(2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT)
+            .addBinding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+            .addBinding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+            .build();
+
+        auto lensSetLayout =
+            DescriptorSetLayout::Builder(device)
+            .addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT)  // flare out
+            .addBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)  // lens surfaces
+            .addBinding(2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)  // lens params
+            .addBinding(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)  // GlobalUbo
+            .build();
+
+        auto exposureReduceLayout =
+            DescriptorSetLayout::Builder(device)
+            .addBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT)
+            .addBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT)
+            .build();
+        
+        auto exposureUpdateLayout =
+            DescriptorSetLayout::Builder(device)
+            .addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
+            .addBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
+            .build();
+
         std::vector<VkDescriptorSet> globalDescriptorSets(SwapChain::MAX_FRAMES_IN_FLIGHT);
+        std::vector<VkDescriptorSet> brightDescriptorSets(SwapChain::MAX_FRAMES_IN_FLIGHT);
+        std::vector<VkDescriptorSet> blurDescriptorSetsH(SwapChain::MAX_FRAMES_IN_FLIGHT);
+        std::vector<VkDescriptorSet> blurDescriptorSetsV(SwapChain::MAX_FRAMES_IN_FLIGHT);
+        std::vector<VkDescriptorSet> lensDescriptorSets(SwapChain::MAX_FRAMES_IN_FLIGHT);
+        std::vector<VkDescriptorSet> exposureReduceDescriptorSet(SwapChain::MAX_FRAMES_IN_FLIGHT);
+        std::vector<VkDescriptorSet> exposureUpdateDescriptorSet(SwapChain::MAX_FRAMES_IN_FLIGHT);
+
+        VkDescriptorImageInfo hdrImageInfo{};
+        hdrImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        hdrImageInfo.imageView = scenePass->getColorView();
+        hdrImageInfo.sampler = scenePass->getColorSampler();
+
+        auto expDataInfo = exposureData->descriptorInfo();
+        auto expStateInfo = exposureState->descriptorInfo();
+
+        VkDescriptorSet exposureReduceSet;
+        DescriptorWriter(*exposureReduceLayout, *globalPool)
+        .writeImage(0, &hdrImageInfo)
+        .writeBuffer(1, &expDataInfo)
+        .build(exposureReduceSet);
+
+        VkDescriptorSet exposureUpdateSet;
+        DescriptorWriter(*exposureUpdateLayout, *globalPool)
+        .writeBuffer(0, &expDataInfo)
+        .writeBuffer(1, &expStateInfo)
+        .build(exposureUpdateSet);
+
+        postDescriptorSets.resize(SwapChain::MAX_FRAMES_IN_FLIGHT);
+
+        auto extent = renderer.getSwapChainExtent();
+        scenePass->recreate(extent);
+        bloomPass->recreate(extent, 0.5f);
+        lensFlarePass->recreate(renderer.getSwapChainExtent(), 1.0f);
+
+        VkDescriptorImageInfo sceneColorInfo{};
+        sceneColorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        sceneColorInfo.imageView   = scenePass->getColorView();     
+        sceneColorInfo.sampler     = scenePass->getColorSampler();
+
+        VkDescriptorImageInfo bloomAInfo{};
+        bloomAInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bloomAInfo.imageView   = bloomPass->getViewA();
+        bloomAInfo.sampler     = bloomPass->getSamplerA();
+
+        VkDescriptorImageInfo bloomBInfo{};
+        bloomBInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bloomBInfo.imageView   = bloomPass->getViewB();
+        bloomBInfo.sampler     = bloomPass->getSamplerB();
+
+        VkDescriptorImageInfo sceneDepthInfo{};
+        sceneDepthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        sceneDepthInfo.imageView = scenePass->getDepthView();
+        sceneDepthInfo.sampler = scenePass->getDepthSampler();
+
+        VkDescriptorImageInfo flareSampledInfo{};
+        flareSampledInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        flareSampledInfo.imageView = lensFlarePass->getFlareView();
+        flareSampledInfo.sampler = lensFlarePass->getFlareSampler();
+
+        for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i) {
+            DescriptorWriter(*brightSetLayout, *globalPool)
+                .writeImage(0, &sceneColorInfo)
+                .build(brightDescriptorSets[i]);
+        }
+
+        for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i) {
+            DescriptorWriter(*blurSetLayout, *globalPool)
+                .writeImage(0, &bloomAInfo)
+                .build(blurDescriptorSetsH[i]);
+
+            DescriptorWriter(*blurSetLayout, *globalPool)
+                .writeImage(0, &bloomBInfo)
+                .build(blurDescriptorSetsV[i]);
+        }
+
+        for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i) {
+            auto bufferInfo = uboBuffers[i]->descriptorInfo();
+
+            enginev::DescriptorWriter(*postSetLayout, *globalPool)
+                .writeImage(0, &sceneColorInfo)
+                .writeImage(1, &bloomAInfo)
+                .writeBuffer(2, &bufferInfo)
+                .writeImage(3, &sceneDepthInfo)
+                .writeImage(4, &flareSampledInfo)
+                .build(postDescriptorSets[i]);
+        }
+
+        for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; i++) {
+            DescriptorWriter(*exposureReduceLayout, *globalPool)
+                .writeImage(0, &hdrImageInfo)
+                .writeBuffer(1, &expDataInfo)
+                .build(exposureReduceDescriptorSet[i]);
+        }
+
+        for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; i++) {
+            DescriptorWriter(*exposureUpdateLayout, *globalPool)
+                .writeBuffer(0, &expDataInfo)
+                .writeBuffer(1, &expStateInfo)
+                .build(exposureUpdateDescriptorSet[i]);
+        }
 
         VkDescriptorImageInfo shadowImageInfo{};
         shadowImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-
         shadowImageInfo.imageView   = shadowImageView;
         shadowImageInfo.sampler     = shadowSampler;
 
@@ -124,15 +363,34 @@ namespace cvsim {
             auto bufferInfo = uboBuffers[i]->descriptorInfo();
 
             DescriptorWriter(*globalSetLayout, *globalPool)
-                .writeBuffer(0, &bufferInfo)      // binding = 0 (UBO)
-                .writeImage(1, &shadowImageInfo)  // binding = 1 (shadowMap sampler2D)
+                .writeBuffer(0, &bufferInfo)     
+                .writeImage(1, &shadowImageInfo) 
                 .writeImage(2, &skyboxImageInfo)
                 .build(globalDescriptorSets[i]);
         }
 
+        for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i) {
+
+            VkDescriptorImageInfo flareStorageInfo{};
+            flareStorageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            flareStorageInfo.imageView   = lensFlarePass->getFlareView();
+            flareStorageInfo.sampler     = VK_NULL_HANDLE; // storage image
+
+            auto lensSurfInfo   = lensSurfacesBuffer->descriptorInfo();
+            auto lensParamsInfo = lensParamsBuffers[i]->descriptorInfo();
+            auto globalInfo     = uboBuffers[i]->descriptorInfo();
+
+            DescriptorWriter(*lensSetLayout, *globalPool)
+                .writeImage(0, &flareStorageInfo)
+                .writeBuffer(1, &lensSurfInfo)
+                .writeBuffer(2, &lensParamsInfo)
+                .writeBuffer(3, &globalInfo)
+                .build(lensDescriptorSets[i]);
+        }
+
         SimpleRenderSystem simpleRenderSystem{
             device,
-            renderer.getSwapChainRenderPass(),
+            scenePass->getRenderPass(),
             globalSetLayout->getDescriptorSetLayout() };
             
         ShadowRenderSystem shadowRenderSystem{
@@ -141,29 +399,65 @@ namespace cvsim {
             globalSetLayout->getDescriptorSetLayout() };
         PointLightSystem pointLightSystem{
            device,
-           renderer.getSwapChainRenderPass(),
+           scenePass->getRenderPass(),
            globalSetLayout->getDescriptorSetLayout() };
 
         SkyboxRenderSystem skyboxRenderSystem(
             device,
-            renderer.getSwapChainRenderPass(),
+            scenePass->getRenderPass(),
             globalSetLayout->getDescriptorSetLayout()
         );
 
-        Camera camera{};
-        auto viewerObject = SimObject::createSimObject();
-        viewerObject.transform.translation.z = -2.5f;
+        BrightExtractRenderSystem brightExtractSystem(
+            device,
+            bloomPass->getRenderPass(),
+            brightSetLayout->getDescriptorSetLayout()
+        );
+
+        BlurRenderSystem blurHSystem(
+            device,
+            bloomPass->getRenderPass(),
+            blurSetLayout->getDescriptorSetLayout(),
+            true
+        );
+
+        BlurRenderSystem blurVSystem(
+            device,
+            bloomPass->getRenderPass(),
+            blurSetLayout->getDescriptorSetLayout(),
+            false
+        );
+
+        PostProcessRenderSystem postProcessSystem(
+            device,
+            renderer.getSwapChainRenderPass(),
+            postSetLayout->getDescriptorSetLayout()
+        );
+
+        ExposureReduceSystem exposureReduceSystem(device);
+        ExposureUpdateSystem exposureUpdateSystem(device);
+
+        std::shared_ptr<Model> skyboxModel = Model::createSkyboxCube(device);
+        
         KeyboardMovementController cameraController{};
+
+        std::vector<CameraRig> cameras;
+        cameras.reserve(3);
+
+        cameras.push_back(CameraRig::MakeCam(glm::vec3(0.f, 0.f, -2.5f), CameraControlType::Keyboard));
+
+        cameras.push_back(CameraRig::MakeCam(glm::vec3(2.f, 1.f, -2.5f), CameraControlType::ROS));
+        cameras.push_back(CameraRig::MakeCam(glm::vec3(2.f, 1.f, -2.5f), CameraControlType::ROS));
+
+        int activeCam = 0;
 
         auto currentTime = std::chrono::high_resolution_clock::now();
 
-        //
         struct FrameCapture { VkBuffer buf{}; VkDeviceMemory mem{}; void* mapped{}; size_t size{}; };
         std::array<FrameCapture, enginev::SwapChain::MAX_FRAMES_IN_FLIGHT> captures;
         
         RosImageBridge ros;
 
-        auto extent = renderer.getSwapChainExtent();
         auto recreateCaptures = [&]() {
             for (auto &c : captures) {
                 if (c.mapped) {
@@ -198,54 +492,55 @@ namespace cvsim {
 
         recreateCaptures();
 
-        //
         while (!window.shouldClose()) {
             glfwPollEvents();
-            
+
+            static bool cWasPressed = false;
+            bool cPressed = glfwGetKey(window.getGLFWwindow(), GLFW_KEY_C) == GLFW_PRESS;
+
+            if (cPressed && !cWasPressed) {
+                activeCam = (activeCam + 1) % static_cast<int>(cameras.size());
+            }
+            cWasPressed = cPressed;
+
             auto newTime = std::chrono::high_resolution_clock::now();
             float frameTime =
                 std::chrono::duration<float, std::chrono::seconds::period>(newTime - currentTime).count();
             currentTime = newTime;
-            //управление с клавиатуры
-            cameraController.moveInPlaneXZ(window.getGLFWwindow(), frameTime, viewerObject);
-            
-            // управление с помощью ROS
+
             auto cmd = ros.getLastCmd();
-            float yawSpeed = 1.0f;
-            float pitchSpeed = 1.0f;
-
-            viewerObject.transform.rotation.y += yawSpeed * cmd.angular.z * frameTime;
-            viewerObject.transform.rotation.x += pitchSpeed * cmd.angular.y * frameTime;
-
-            viewerObject.transform.rotation.x = 
-                glm::clamp(viewerObject.transform.rotation.x, -1.5f, 1.5f);
-
-            float yaw = viewerObject.transform.rotation.y;
-            const glm::vec3 forwardDir{ sin(yaw), 0.f, cos(yaw)};
-            const glm::vec3 rightDir{ forwardDir.z, 0.f, -forwardDir.x};
-            const glm::vec3 upDir{ 0.f, -1.f, 0.f};
-
-            float lx = static_cast<float>(cmd.linear.x);
-            float ly = static_cast<float>(cmd.linear.y);
-            float lz = static_cast<float>(cmd.linear.z);
-
-            glm::vec3 moveDir =
-                forwardDir * lx +
-                rightDir * ly +
-                upDir * lz;
             
-            float rosMoveSpeed = 1.0f;
+            for (size_t i = 0; i < cameras.size(); ++i)
+            {
+                auto& cam = cameras[i];
 
-            if (glm::length(moveDir) > std::numeric_limits<float>::epsilon()) {
-                viewerObject.transform.translation +=
-                    rosMoveSpeed * frameTime * moveDir;
+                if (static_cast<int>(i) == activeCam)
+                {
+                    if (cam.control == CameraControlType::Keyboard) {
+                        cameraController.moveInPlaneXZ(
+                            window.getGLFWwindow(), frameTime, cam.rig
+                        );
+                    } else {
+
+                            cameraController.moveInPlaneXZ(
+                                window.getGLFWwindow(), frameTime, cam.rig
+                            );
+                            cam.applyRos(frameTime, cmd);
+                        
+                    }
+                }
+
+                cam.camera.setViewYXZ(cam.rig.transform.translation, cam.rig.transform.rotation);
             }
 
-            camera.setViewYXZ(viewerObject.transform.translation, viewerObject.transform.rotation);
-           
             float aspect = renderer.getAspectRatio();
+            for (auto& cam : cameras) {
+                cam.camera.setPerspectiveProjection(glm::radians(50.f), aspect, 0.1f, 100.f);
+            }
 
-            camera.setPerspectiveProjection(glm::radians(50.f), aspect, 0.1f, 100.f); // íàñòðîéêà âèäèìîñòè
+            enginev::Camera& camera = cameras[activeCam].camera;
+            //glm::vec3 cameraPos = camera.getPosition();
+            //glm::vec3 sunVisualPos = cameraPos - lightDir * 10;
 
             if (auto commandBuffer = renderer.beginFrame()) {
                 int frameIndex = renderer.getFrameIndex();
@@ -257,8 +552,83 @@ namespace cvsim {
                     vkDeviceWaitIdle(device.device());
                     extent = newExtent;
                     recreateCaptures();
-                }
 
+                    scenePass->recreate(extent);
+                    bloomPass->recreate(extent, 0.5f);
+                    lensFlarePass->recreate(renderer.getSwapChainExtent(), 1.0f);
+
+                    VkDescriptorImageInfo sceneColorInfo{};
+                    sceneColorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    sceneColorInfo.imageView   = scenePass->getColorView();
+                    sceneColorInfo.sampler     = scenePass->getColorSampler();
+
+                    VkDescriptorImageInfo bloomAInfo{};
+                    bloomAInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    bloomAInfo.imageView   = bloomPass->getViewA();
+                    bloomAInfo.sampler     = bloomPass->getSamplerA();
+
+                    VkDescriptorImageInfo bloomBInfo{};
+                    bloomBInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    bloomBInfo.imageView   = bloomPass->getViewB();
+                    bloomBInfo.sampler     = bloomPass->getSamplerB();
+
+                    VkDescriptorImageInfo sceneDepthInfo{};
+                    sceneDepthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    sceneDepthInfo.imageView = scenePass->getDepthView();
+                    sceneDepthInfo.sampler = scenePass->getDepthSampler();
+
+                    VkDescriptorImageInfo flareSampledInfo{};
+                    flareSampledInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    flareSampledInfo.imageView   = lensFlarePass->getFlareView();
+                    flareSampledInfo.sampler     = lensFlarePass->getFlareSampler();
+
+                    // bright: scene -> bloomA
+                    for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i) {
+                        DescriptorWriter(*brightSetLayout, *globalPool)
+                            .writeImage(0, &sceneColorInfo)
+                            .build(brightDescriptorSets[i]);
+                    }
+
+                     for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i) {
+                        DescriptorWriter(*blurSetLayout, *globalPool)
+                            .writeImage(0, &bloomAInfo)
+                            .build(blurDescriptorSetsH[i]);
+
+                        DescriptorWriter(*blurSetLayout, *globalPool)
+                            .writeImage(0, &bloomBInfo)
+                            .build(blurDescriptorSetsV[i]);
+                            }
+
+                    for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i) {
+                        auto bufferInfo = uboBuffers[i]->descriptorInfo();
+
+                        DescriptorWriter(*postSetLayout, *globalPool)
+                            .writeImage(0, &sceneColorInfo)
+                            .writeImage(1, &bloomAInfo)
+                            .writeBuffer(2, &bufferInfo)
+                            .writeImage(3, &sceneDepthInfo)
+                            .writeImage(4, &flareSampledInfo)
+                            .build(postDescriptorSets[i]);
+                    }
+
+                    for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i) {
+                        VkDescriptorImageInfo flareStorageInfo{};
+                        flareStorageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                        flareStorageInfo.imageView   = lensFlarePass->getFlareView();
+                        flareStorageInfo.sampler     = VK_NULL_HANDLE;
+
+                        auto lensSurfInfo   = lensSurfacesBuffer->descriptorInfo();
+                        auto lensParamsInfo = lensParamsBuffers[i]->descriptorInfo();
+                        auto globalInfo     = uboBuffers[i]->descriptorInfo();
+
+                        DescriptorWriter(*lensSetLayout, *globalPool)
+                            .writeImage(0, &flareStorageInfo)
+                            .writeBuffer(1, &lensSurfInfo)
+                            .writeBuffer(2, &lensParamsInfo)
+                            .writeBuffer(3, &globalInfo)
+                            .build(lensDescriptorSets[i]);
+                    }
+                }
                 FrameInfo frameInfo{ 
                     frameIndex, 
                     frameTime, 
@@ -267,35 +637,116 @@ namespace cvsim {
                     globalDescriptorSets[frameIndex], 
                     simObjects};
                 
-    
                 GlobalUbo ubo{};
                 ubo.projection = camera.getProjection();
                 ubo.view = camera.getView();
                 ubo.inverseView = glm::inverse(camera.getView());
-                ubo.ambientLightColor = glm::vec4(1.f, 1.f, 1.f, 0.02f);
+
+                glm::mat4 invView = ubo.inverseView;
+
+                glm::mat4 V = camera.getView();
+                glm::mat4 P = camera.getProjection();
+                glm::mat4 invV = glm::inverse(V);
+
+                glm::vec3 camPos = glm::vec3(invV[3]);
+                glm::vec3 camForward = glm::normalize(-glm::vec3(invV[2]));
+
+                glm::vec3 sunWorld = camPos + (-lightDir) * 10000.0f;
+                glm::vec3 sunWorldInv = camPos + (lightDir) * 10000.0f;
+                glm::vec3 sunViewDir = glm::normalize(sunWorldInv - camPos);
+                float dotFS = glm::clamp(glm::dot(camForward, sunViewDir), 0.0f, 1.0f);
+                float sunFactor = glm::smoothstep(0.70f, 0.95f, dotFS);
+
+                ubo.sunParams = glm::vec4(sunFactor, 0.f, 0.f, 0.f);
+
+
+                glm::vec4 clip = P * V * glm::vec4(sunWorld, 1.0f);
+
+                glm::vec2 sunUV(0.5f);
+                float visibility = 0.0f;
+
+                if (clip.w > 0.0f) {
+                    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+
+                    sunUV = glm::vec2(ndc.x, ndc.y) * 0.5f + glm::vec2(0.5f);
+
+                    const float sunCosSize = 0.995f;
+                    float sunTheta = acos(sunCosSize);
+                    float tanTheta = tan(sunTheta);
+
+                    float P00 = P[0][0];
+                    float P11 = P[1][1];
+
+                    float rNdcX = tanTheta * P00;
+                    float rNdcY = tanTheta * P11;
+
+                    float rUvX = rNdcX * 0.5f;
+                    float rUvY = rNdcY * 0.5f;
+
+                    bool intersects = 
+                        sunUV.x >= -rUvX && sunUV.x <= 1.0f + rUvX &&
+                        sunUV.y >= -rUvY && sunUV.y <= 1.0f + rUvY;
+                    
+                    visibility = intersects ? 1.0f : 0.0f;
+                    //glm::vec3 ndc = glm::vec3(clip) / clip.w;
+
+                    //sunUV = glm::vec2(ndc.x, ndc.y) * 0.5f + glm::vec2(0.5f);
+
+                    //visibility = 1.0;
+                }
+
+                //visibility *= sunFactor;
+
+                ubo.sunScreen = glm::vec4(sunUV, visibility, 1.0f);
+
+                ubo.ambientLightColor = glm::vec4(1.0f, 0.95f, 0.7f, 0.15f);
                 
                 ubo.sunDirection = glm::vec4(lightDir, 0.f);
                 ubo.sunColor = sunColor;
                 
-                glm::vec3 lightPos = lightDir;
-                glm::vec3 center   = glm::vec3(0.0f);
+                glm::vec3 L = glm::normalize(lightDir); // направление света
+                //glm::vec3 camPos = camera.getPosition();
+                //glm::mat4 invView = glm::inverse(camera.getView());
+                //glm::vec3 forward = glm::normalize(glm::vec3(invView[2]));
 
-                glm::mat4 lightView = glm::lookAt(
+                //glm::vec3 center = camPos + forward * 10.f;
+
+                glm::vec3 center   = glm::vec3(0.0f);
+                glm::vec3 lightPos = center - L * 50.0f;
+
+
+                /*glm::vec3 lightPos = ubo.sunDirection;
+                glm::vec3 center   = glm::vec3(0.0f);*/
+
+                glm::mat4 lightView = glm::lookAtRH(
                     lightPos,
                     center,
                     glm::vec3(0.0f, 1.0f, 0.0f));
 
                 float orthoSize = 10.0f;
-                glm::mat4 lightProj = glm::ortho(
+                glm::mat4 lightProj = glm::orthoRH_ZO(
                     -orthoSize, orthoSize,
                     -orthoSize, orthoSize,
-                    1.0f, 50.0f);
+                    0.1f, 80.0f);
 
                 ubo.lightViewProj = lightProj * lightView;
 
                 pointLightSystem.update(frameInfo, ubo);
                 uboBuffers[frameIndex]->writeToBuffer(&ubo);
                 uboBuffers[frameIndex]->flush();
+
+                LensParamsGPU lensParams{};
+                lensParams.surfaceCount = static_cast<int>(lensSurfacesCpu.size());
+                lensParams.sensorZ = 0.060f;
+
+                lensParams.sensorW = 0.036f;
+                lensParams.sensorH = 0.024f;
+
+                lensParams.sensorW = 0.036f;
+                lensParams.sensorH = 0.024f;
+
+                lensParamsBuffers[frameIndex]->writeToBuffer(&lensParams);
+                lensParamsBuffers[frameIndex]->flush();
 
                 VkClearValue clearDepth{};
                 clearDepth.depthStencil = { 1.0f, 0 };
@@ -305,7 +756,7 @@ namespace cvsim {
                 shadowRpInfo.renderPass          = shadowRenderPass;
                 shadowRpInfo.framebuffer         = shadowFramebuffer;
                 shadowRpInfo.renderArea.offset   = {0, 0};
-                shadowRpInfo.renderArea.extent   = { 2048u, 2048u };  
+                shadowRpInfo.renderArea.extent   = { 4096u, 4096u };  
                 shadowRpInfo.clearValueCount     = 1;
                 shadowRpInfo.pClearValues        = &clearDepth;
 
@@ -314,29 +765,103 @@ namespace cvsim {
                 VkViewport shadowViewport{};
                 shadowViewport.x        = 0.0f;
                 shadowViewport.y        = 0.0f;
-                shadowViewport.width    = 2048.0f;
-                shadowViewport.height   = 2048.0f;
+                shadowViewport.width    = static_cast<float>(shadowExtent.width);
+                shadowViewport.height   = static_cast<float>(shadowExtent.height);
                 shadowViewport.minDepth = 0.0f;
                 shadowViewport.maxDepth = 1.0f;
                 vkCmdSetViewport(commandBuffer, 0, 1, &shadowViewport);
 
                 VkRect2D shadowScissor{};
                 shadowScissor.offset = {0, 0};
-                shadowScissor.extent = { 2048u, 2048u };
+                shadowScissor.extent = shadowExtent;
                 vkCmdSetScissor(commandBuffer, 0, 1, &shadowScissor);
 
                 shadowRenderSystem.renderSimObjects(frameInfo);
 
                 vkCmdEndRenderPass(commandBuffer);
 
-                renderer.beginSwapChainRenderPass(commandBuffer);
+                /*renderer.beginSwapChainRenderPass(commandBuffer);
 
                 skyboxRenderSystem.render(frameInfo);
 
                 simpleRenderSystem.renderSimObjects(frameInfo);
                 pointLightSystem.render(frameInfo);
                 
+                renderer.endSwapChainRenderPass(commandBuffer);*/
+
+                scenePass->begin(commandBuffer);
+
+                skyboxRenderSystem.render(frameInfo);
+                simpleRenderSystem.renderSimObjects(frameInfo);
+                pointLightSystem.render(frameInfo);
+
+                scenePass->end(commandBuffer);
+                
+                BrightPushConstant brightPC{};
+                brightPC.threshold = 0.85f;
+                brightPC.knee = 0.08f;
+
+                bloomPass->beginBright(commandBuffer);
+                brightExtractSystem.render(frameInfo, brightDescriptorSets[frameIndex], brightPC);
+                bloomPass->endBright(commandBuffer);
+                
+                BlurPushConstant blurPC{};
+                blurPC.texelSize = {
+                    1.0f / extent.width,
+                     1.0f / extent.height
+                };
+                blurPC.radius = 5.0f;
+
+                bloomPass->beginBlurH(commandBuffer);
+                blurHSystem.render(frameInfo, blurDescriptorSetsH[frameIndex], blurPC);
+                bloomPass->endBlurH(commandBuffer);
+
+                bloomPass->beginBlurV(commandBuffer);
+                blurVSystem.render(frameInfo, blurDescriptorSetsV[frameIndex], blurPC);
+                bloomPass->endBlurV(commandBuffer);
+
+                lensFlarePass->transitionToGeneral(commandBuffer);
+                lensFlarePass->dispatch(commandBuffer, lensDescriptorSets[frameIndex]);
+                lensFlarePass->transitionToShaderRead(commandBuffer);
+
+                exposureReduceSystem.dispatch(
+                    commandBuffer,
+                    extent,
+                    exposureReduceDescriptorSet[frameIndex]
+                );
+
+                VkMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+                vkCmdPipelineBarrier(
+                    commandBuffer,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    1, &barrier,
+                    0, nullptr,
+                    0, nullptr
+                );
+
+                exposureUpdateSystem.dispatch(
+                    commandBuffer,
+                    exposureUpdateDescriptorSet[frameIndex]
+                );
+
+                ExposureState cpuExp{};
+                std::memcpy(&cpuExp, exposureState->getMappedMemory(), sizeof(ExposureState));
+
+                ubo.autoExposure = cpuExp.autoExposure;     
+                uboBuffers[frameIndex]->writeToBuffer(&ubo);
+                uboBuffers[frameIndex]->flush();
+
+                renderer.beginSwapChainRenderPass(commandBuffer);
+                postProcessSystem.render(frameInfo, postDescriptorSets[frameIndex]);
                 renderer.endSwapChainRenderPass(commandBuffer);
+
+
                 renderer.copySwapImageToBuffer(commandBuffer, captures[frameIndex].buf);
                 renderer.endFrame();
                 
@@ -353,6 +878,15 @@ namespace cvsim {
             
         }
         vkDeviceWaitIdle(device.device());
+        if (lensFlarePass) 
+        {
+            lensFlarePass->destroy();
+            lensFlarePass.reset();
+        }
+
+        bloomPass->destroy();
+        scenePass->destroy();
+
         destroyShadowResources();
         destroySkyboxCubemap();
     }
@@ -388,9 +922,9 @@ namespace cvsim {
             if (firstFace) {
                 texWidth = w;
                 texHeight = h;
-                texChannels = 4; // принудительно RGBA8
+                texChannels = 4; 
                 faceSize = static_cast<size_t>(texWidth) * texHeight * texChannels;
-                pixelData.resize(faceSize * faces.size()); // ровно под 6 сторон
+                pixelData.resize(faceSize * faces.size()); 
                 firstFace = false;
             } else {
                 if (w != texWidth || h != texHeight) {
@@ -410,7 +944,6 @@ namespace cvsim {
                         unsigned char* pL = row + x * stride;
                         unsigned char* pR = row + (width - 1 - x) * stride;
 
-                        // меняем местами RGBA (4 байта)
                         for (int c = 0; c < stride; ++c) {
                             std::swap(pL[c], pR[c]);
                         }
@@ -418,14 +951,10 @@ namespace cvsim {
                 }
             }
 
-            // копируем данные этой грани в наш общий буфер
             std::memcpy(pixelData.data() + faceSize * i, pixels, faceSize);
 
-            // освобождаем оригинальный буфер stb
             stbi_image_free(pixels);
         }
-
-        // 2. Создаём staging-буфер и копируем туда все 6 граней
 
         VkDeviceSize imageSize = faceSize * faces.size();
 
@@ -444,16 +973,14 @@ namespace cvsim {
         std::memcpy(data, pixelData.data(), static_cast<size_t>(imageSize));
         vkUnmapMemory(device.device(), stagingBufferMemory);
 
-        // 3. Создаём кубическую VkImage
-
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageInfo.imageType = VK_IMAGE_TYPE_2D;
         imageInfo.extent.width  = static_cast<uint32_t>(texWidth);
         imageInfo.extent.height = static_cast<uint32_t>(texHeight);
         imageInfo.extent.depth  = 1;
-        imageInfo.mipLevels     = 1;    // можно добавить mip'ы позже
-        imageInfo.arrayLayers   = 6;    // 6 граней
+        imageInfo.mipLevels     = 1;    
+        imageInfo.arrayLayers   = 6;    
         imageInfo.format        = VK_FORMAT_R8G8B8A8_SRGB;
         imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -469,9 +996,6 @@ namespace cvsim {
             skyboxImage,
             skyboxImageMemory);
 
-        // 4. Переводим layout куба и копируем staging → image
-
-        // Переход в TRANSFER_DST_OPTIMAL
         device.transitionImageLayout(
             skyboxImage,
             imageInfo.format,
@@ -479,16 +1003,13 @@ namespace cvsim {
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             6);
 
-        // Копируем сразу все 6 граней.
-        // Важно: copyBufferToImage должна уметь работать с layerCount > 1.
         device.copyBufferToImage(
             stagingBuffer,
             skyboxImage,
             static_cast<uint32_t>(texWidth),
             static_cast<uint32_t>(texHeight),
-            /*layerCount=*/6);
+            6);
 
-        // После копирования переводим в SHADER_READ_ONLY_OPTIMAL
         device.transitionImageLayout(
             skyboxImage,
             imageInfo.format,
@@ -496,11 +1017,8 @@ namespace cvsim {
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             6);
 
-        // 5. Уничтожаем staging-буфер
         vkDestroyBuffer(device.device(), stagingBuffer, nullptr);
         vkFreeMemory(device.device(), stagingBufferMemory, nullptr);
-
-        // 6. Создаём image view как CUBE
 
         VkImageViewCreateInfo viewInfo{};
         viewInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -516,8 +1034,6 @@ namespace cvsim {
         if (vkCreateImageView(device.device(), &viewInfo, nullptr, &skyboxImageView) != VK_SUCCESS) {
             throw std::runtime_error("failed to create skybox image view");
         }
-
-        // 7. Создаём sampler
 
         VkSamplerCreateInfo samplerInfo{};
         samplerInfo.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -557,22 +1073,32 @@ namespace cvsim {
         subpass.pColorAttachments       = nullptr;
         subpass.pDepthStencilAttachment = &depthRef;
 
-        VkSubpassDependency dependency{};
-        dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass    = 0;
-        dependency.srcStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        dependency.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        dependency.dstStageMask  = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-        dependency.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        std::array<VkSubpassDependency, 2> deps{};
+
+        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+        deps[0].dstSubpass = 0;
+        deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        deps[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                       VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        deps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        deps[1].srcSubpass = 0;
+        deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
         VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.dependencyCount = static_cast<uint32_t>(deps.size());
+        renderPassInfo.pDependencies = deps.data();
+
         renderPassInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         renderPassInfo.attachmentCount = 1;
         renderPassInfo.pAttachments    = &depthAttachment;
         renderPassInfo.subpassCount    = 1;
         renderPassInfo.pSubpasses      = &subpass;
-        renderPassInfo.dependencyCount = 1;
-        renderPassInfo.pDependencies   = &dependency;
 
         if (vkCreateRenderPass(device.device(), &renderPassInfo, nullptr, &shadowRenderPass) != VK_SUCCESS) {
             throw std::runtime_error("failed to create shadow render pass");
@@ -646,7 +1172,12 @@ namespace cvsim {
         samplerInfo.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
         samplerInfo.magFilter    = VK_FILTER_LINEAR;
         samplerInfo.minFilter    = VK_FILTER_LINEAR;
-        samplerInfo.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        samplerInfo.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+
+        samplerInfo.minLod = 0.0f;
+        samplerInfo.maxLod = 0.0f;
+        samplerInfo.mipLodBias = 0.0f;
+
         samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -663,84 +1194,133 @@ namespace cvsim {
     void SimApp::loadSimObjects() {
         nlohmann::json scene;
 
-        std::ifstream file("../assets/scene_config.json");
+        std::ifstream file("../assets/simple_scene.json");
         if (!file.is_open()) {
             throw std::runtime_error("Can't open scene_config.json");
         }
 
         file >> scene;
 
-        for (auto& obj : scene["objects"]) {
-            std::string modelPath = obj["model"];
+        if (scene.contains("pointLights")) {
+            for (auto& light : scene["pointLights"]) {
+                auto pointLight = SimObject::makePointLight(light["intensity"]);
 
-            std::shared_ptr<Model> model = Model::createModelFromFile(device, modelPath);
+                pointLight.color = {
+                    light["color"][0],
+                    light["color"][1],
+                    light["color"][2]
+                };
 
-            auto simObj = SimObject::createSimObject();
-            simObj.model = model;
+                pointLight.transform.translation = {
+                    light["position"][0],
+                    light["position"][1],
+                    light["position"][2]
+                };
+                
 
-            simObj.transform.translation = {
-                obj["position"][0],
-                obj["position"][1],
-                obj["position"][2]
-            };
 
-            simObj.transform.rotation = { 
-                obj["rotation"][0],
-                obj["rotation"][1],
-                obj["rotation"][2] 
-            };
+                simObjects.emplace(pointLight.getId(), std::move(pointLight));
+            }
+        }
+        if (scene.contains("sun")) {
+            for (auto& sun : scene["sun"]) {
+                //auto sun_obj = SimObject::makePointLight(sun["intensity"], sun["radius"]);
 
-            simObj.transform.scale = { 
-                obj["scale"][0],
-                obj["scale"][1],
-                obj["scale"][2] 
-            };
-            simObjects.emplace(simObj.getId(), std::move(simObj));
+                glm::vec3 color {
+                    sun["color"][0].get<float>(),
+                    sun["color"][1].get<float>(),
+                    sun["color"][2].get<float>(),
+                };
+
+                glm::vec3 pos {
+                    sun["direction"][0].get<float>(),
+                    sun["direction"][1].get<float>(), 
+                    sun["direction"][2].get<float>()
+                };
+
+                lightDir = glm::normalize(pos);
+                sunColor = glm::vec4(color, sun["intensity"].get<float>());
+            } 
+        }
+        if (stressCfg_.enabled) {
+            const int stressCount = (stressCfg_.count > 0) ? stressCfg_.count : 50000;
+            const float spacing = (stressCfg_.spacing > 0.0f) ? stressCfg_.spacing : 2.0f;
+
+            std::string modelPath = stressCfg_.modelPath;
+            if (modelPath.empty()) {
+                if (scene.contains("objects") && !scene["objects"].empty() && scene["objects"][0].contains("model")) {
+                    modelPath = scene["objects"][0]["model"].get<std::string>();
+                }
+            }
+            if (modelPath.empty()) {
+                throw std::runtime_error(
+                    "Stress mode: model path is empty. Provide --stress-model PATH or put at least one object in scene_config.json"
+                );
+            }
+
+            std::shared_ptr<Model> sharedModel = getModelCached_(modelPath);
+
+            simObjects.reserve(simObjects.size() + static_cast<size_t>(stressCount) + 16);
+
+            const int side = static_cast<int>(std::ceil(std::cbrt(static_cast<double>(stressCount))));
+            const float half = 0.5f * static_cast<float>(side - 1);
+
+            int created = 0;
+            for (int x = 0; x < side && created < stressCount; ++x) {
+                for (int y = 0; y < side && created < stressCount; ++y) {
+                    for (int z = 0; z < side && created < stressCount; ++z) {
+                        auto simObj = SimObject::createSimObject();
+                        simObj.model = sharedModel;
+
+                        simObj.transform.translation = {
+                            (static_cast<float>(x) - half) * spacing,
+                            (static_cast<float>(y) - half) * spacing,
+                            (static_cast<float>(z) - half) * spacing
+                        };
+                        simObj.transform.rotation = { 0.0f, 0.0f, 0.0f };
+                        simObj.transform.scale = { 1.0f, 1.0f, 1.0f };
+
+                        simObjects.emplace(simObj.getId(), std::move(simObj));
+                        ++created;
+                    }
+                }
+            }
+
+            std::cout << "[STRESS] Enabled: spawned " << created
+                << " objects, model=" << modelPath
+                << ", spacing=" << spacing << "\n";
+
+            return; // не грузим обычные objects
         }
 
-        for (auto& light : scene["pointLights"]) {
-            auto pointLight = SimObject::makePointLight(light["intensity"]);
+        if (scene.contains("objects")) {
+            for (auto& obj : scene["objects"]) {
+                std::string modelPath = obj["model"];
 
-            pointLight.color = {
-                light["color"][0],
-                light["color"][1],
-                light["color"][2]
-            };
+                std::shared_ptr<Model> model = Model::createModelFromFile(device, modelPath);
 
-            pointLight.transform.translation = {
-                light["position"][0],
-                light["position"][1],
-                light["position"][2]
-            };
+                auto simObj = SimObject::createSimObject();
+                simObj.model = model;
 
+                simObj.transform.translation = {
+                    obj["position"][0],
+                    obj["position"][1],
+                    obj["position"][2]
+                };
 
+                simObj.transform.rotation = { 
+                    obj["rotation"][0],
+                    obj["rotation"][1],
+                    obj["rotation"][2] 
+                };
 
-            simObjects.emplace(pointLight.getId(), std::move(pointLight));
+                simObj.transform.scale = { 
+                    obj["scale"][0],
+                    obj["scale"][1],
+                    obj["scale"][2] 
+                };
+                simObjects.emplace(simObj.getId(), std::move(simObj));
+            }
         }
-
-        for (auto& sun : scene["sun"]) {
-            auto sun_obj = SimObject::makePointLight(sun["intensity"], sun["radius"]);
-
-            glm::vec3 color {
-                sun["color"][0].get<float>(),
-                sun["color"][1].get<float>(),
-                sun["color"][2].get<float>(),
-            };
-
-            glm::vec3 pos {
-                sun["position"][0].get<float>(),
-                sun["position"][1].get<float>(), 
-                sun["position"][2].get<float>()
-            };
-
-            sun_obj.transform.translation = pos;
-            sun_obj.color = color;
-
-            sunWorldPos = pos;
-            lightDir = glm::normalize(glm::vec3(0.0f) - pos);
-            
-            sunColor = glm::vec4(color, sun["intensity"].get<float>()); 
-            simObjects.emplace(sun_obj.getId(), std::move(sun_obj));
-        } 
     }
 }

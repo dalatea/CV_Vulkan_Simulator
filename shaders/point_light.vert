@@ -20,9 +20,17 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
   mat4 projection;
   mat4 view;
   mat4 invView;
+  mat4 lightViewProj;
+
   vec4 ambientLightColor; // w is intensity
+
+  vec4 sunParams;
+  vec4 sunScreen;
+  
   PointLight pointLights[10];
   int numLights;
+
+  float sutoExposure;
 } ubo;
 
 layout(push_constant) uniform Push {

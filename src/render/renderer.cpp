@@ -153,7 +153,6 @@ namespace enginev {
         region.imageOffset = { 0,0,0 };
         region.imageExtent = { e.width, e.height, 1 };
 
-        // swapchain image уже в TRANSFER_SRC_OPTIMAL (финал рендерпасса)
         vkCmdCopyImageToBuffer(
             cmd,
             swapChain->getImage(currentImageIndex),
@@ -161,7 +160,6 @@ namespace enginev {
             dstBuffer,
             1, &region);
 
-        // барьер в PRESENT для последующего vkQueuePresentKHR
         VkImageMemoryBarrier toPresent{};
         toPresent.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         toPresent.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;

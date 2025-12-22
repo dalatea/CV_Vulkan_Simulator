@@ -17,18 +17,25 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
   
   vec4 sunDirection;
   vec4 sunColor;
+
+  vec4 sunParams;
+  vec4 sunScreen;
   
   PointLight pointLights[10];
   int numLights;
+
+  float autoExposure;
 } ubo;
 
 layout(location = 0) in vec3 position;
 
 void main() {
-    mat4 viewRot = mat4(mat3(ubo.view));
-    vec4 posClip = ubo.projection * viewRot * vec4(position, 1.0);
+    mat3 viewRot = mat3(ubo.invView);
+    //vec4 posClip = ubo.projection * viewRot * vec4(position, 1.0);
 
+    //gl_Position = vec4(posClip.x, posClip.y, posClip.w, posClip.w);
+
+    vDir = viewRot * position;
+    vec4 posClip = ubo.projection * vec4(position, 1.0);
     gl_Position = vec4(posClip.x, posClip.y, posClip.w, posClip.w);
-
-    vDir = position;
 }

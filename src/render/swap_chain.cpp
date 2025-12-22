@@ -30,6 +30,11 @@ namespace enginev {
     }
 
 	SwapChain::~SwapChain() {
+        for (auto framebuffer : swapChainFramebuffers) {
+			vkDestroyFramebuffer(device.device(), framebuffer, nullptr);
+		}
+
+        swapChainFramebuffers.clear();
 		for (auto imageView : swapChainImageViews) {
 			vkDestroyImageView(device.device(), imageView, nullptr);
 		}
@@ -46,13 +51,9 @@ namespace enginev {
 			vkFreeMemory(device.device(), depthImageMemorys[i], nullptr);
 		}
 
-		for (auto framebuffer : swapChainFramebuffers) {
-			vkDestroyFramebuffer(device.device(), framebuffer, nullptr);
-		}
-
+		
 		vkDestroyRenderPass(device.device(), renderPass, nullptr);
 
-		// cleanup synchronization objects
 		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 			vkDestroySemaphore(device.device(), renderFinishedSemaphores[i], nullptr);
 			vkDestroySemaphore(device.device(), imageAvailableSemaphores[i], nullptr);
@@ -72,7 +73,7 @@ namespace enginev {
 			device.device(),
 			swapChain,
 			std::numeric_limits<uint64_t>::max(),
-			imageAvailableSemaphores[currentFrame],  // must be a not signaled semaphore
+			imageAvailableSemaphores[currentFrame],  
 			VK_NULL_HANDLE,
 			imageIndex);
 
@@ -175,11 +176,6 @@ namespace enginev {
         if (vkCreateSwapchainKHR(device.device(), &createInfo, nullptr, &swapChain) != VK_SUCCESS) {
             throw std::runtime_error("failed to create swap chain!");
         }
-
-        // we only specified a minimum number of images in the swap chain, so the implementation is
-        // allowed to create a swap chain with more. That's why we'll first query the final number of
-        // images with vkGetSwapchainImagesKHR, then resize the container and finally call it again to
-        // retrieve the handles.
         vkGetSwapchainImagesKHR(device.device(), swapChain, &imageCount, nullptr);
         swapChainImages.resize(imageCount);
         vkGetSwapchainImagesKHR(device.device(), swapChain, &imageCount, swapChainImages.data());
@@ -253,6 +249,17 @@ namespace enginev {
         dependency.srcAccessMask = 0;
         dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
 
+        VkSubpassDependency depOut{};
+
+        depOut.srcSubpass = 0;
+        depOut.dstSubpass = VK_SUBPASS_EXTERNAL;
+        depOut.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        depOut.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        depOut.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        depOut.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+        std::array<VkSubpassDependency, 2> deps{dependency, depOut};
+
         std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
         VkRenderPassCreateInfo renderPassInfo = {};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -260,8 +267,8 @@ namespace enginev {
         renderPassInfo.pAttachments = attachments.data();
         renderPassInfo.subpassCount = 1;
         renderPassInfo.pSubpasses = &subpass;
-        renderPassInfo.dependencyCount = 1;
-        renderPassInfo.pDependencies = &dependency;
+        renderPassInfo.dependencyCount = static_cast<uint32_t>(deps.size());
+        renderPassInfo.pDependencies = deps.data();
 
         if (vkCreateRenderPass(device.device(), &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
             throw std::runtime_error("failed to create render pass!");
@@ -386,13 +393,6 @@ namespace enginev {
                 return availablePresentMode;
             }
         }
-
-        // for (const auto &availablePresentMode : availablePresentModes) {
-        //   if (availablePresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
-        //     std::cout << "Present mode: Immediate" << std::endl;
-        //     return availablePresentMode;
-        //   }
-        // }
 
         std::cout << "Present mode: V-Sync" << std::endl;
         return VK_PRESENT_MODE_FIFO_KHR;

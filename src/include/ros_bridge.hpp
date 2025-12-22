@@ -4,6 +4,7 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <thread>
 #include <mutex>
+#include <cstring>
 
 class RosImageBridge {
 public:
@@ -30,6 +31,7 @@ public:
 
   ~RosImageBridge() {
     rclcpp::shutdown();
+    
     if (spin_.joinable()) spin_.join();
   }
 
@@ -38,7 +40,8 @@ public:
     auto msg = sensor_msgs::msg::Image();
     msg.header.stamp = node_->get_clock()->now();
     msg.header.frame_id = "sim_camera";
-    msg.width = width; msg.height = height;
+    msg.width = width; 
+    msg.height = height;
     msg.encoding = "bgra8";
     msg.is_bigendian = false;
     msg.step = width * 4;

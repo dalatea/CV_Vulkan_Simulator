@@ -75,7 +75,6 @@ namespace enginev {
 			VkImageLayout newLayout,
 			uint32_t layerCount = 1);
 		VkPhysicalDeviceProperties properties;
-
 	private:
 		void createInstance();
 		void setupDebugMessenger();
@@ -110,6 +109,8 @@ namespace enginev {
 		VkQueue presentQueue_;
 
 		const std::vector<const char*> validationLayers = { "VK_LAYER_KHRONOS_validation" };
-		const std::vector<const char*> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+		const std::vector<const char*> deviceExtensions = { 
+			VK_KHR_SWAPCHAIN_EXTENSION_NAME
+		};
 	};
 }

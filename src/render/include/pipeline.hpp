@@ -45,7 +45,6 @@ namespace enginev {
 		static void defaultPipelineConfigInfo(PipelineConfigInfo& configInfo);
 		static void enablleAlphaBlending(PipelineConfigInfo& configInfo);
 	private:
-		// чтение файлов шейдеров
 		static std::vector<char> readFile(const std::string& filename);
 
 		void createGraphicsPipeline(
