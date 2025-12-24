@@ -492,6 +492,14 @@ namespace cvsim {
 
         recreateCaptures();
 
+        double fpsWindowTime = 0.0;
+        std::uint64_t fpsWindowFrames = 0;
+
+        double totalTime = 0.0;
+        std::uint64_t totalFrames = 0;
+
+        const double fpsPrintPeriod = 1.0;
+
         while (!window.shouldClose()) {
             glfwPollEvents();
 
@@ -864,6 +872,20 @@ namespace cvsim {
 
                 renderer.copySwapImageToBuffer(commandBuffer, captures[frameIndex].buf);
                 renderer.endFrame();
+
+                fpsWindowTime += frameTime;
+                fpsWindowFrames += 1;
+
+                totalTime += frameTime;
+                totalFrames += 1;
+
+                if (fpsWindowTime >= fpsPrintPeriod) {
+                    const double fps = static_cast<double>(fpsWindowFrames) / fpsWindowTime;
+                    std::cout << "FPS: " << fps << std::endl;
+
+                    fpsWindowTime = 0.0;
+                    fpsWindowFrames = 0;
+                }
                 
                 ros.publishBGRA8(
                   extent.width, extent.height,
@@ -871,6 +893,7 @@ namespace cvsim {
                   captures[frameIndex].size);
             }
         }
+
         for (auto& c : captures) {
             if (c.mapped) vkUnmapMemory(device.device(), c.mem);
             if (c.buf) vkDestroyBuffer(device.device(), c.buf, nullptr);
@@ -889,6 +912,15 @@ namespace cvsim {
 
         destroyShadowResources();
         destroySkyboxCubemap();
+
+        if (totalTime > 0.0) {
+            const double avgFps = static_cast<double>(totalFrames) / totalTime;
+            std::cout << "\n\n\n\n\n\n\n\nAverage FPS: " << avgFps
+                      << " (frames=" << totalFrames
+                      << ", time=" << totalTime << "s)\n\n\n\n\n\n\n\n" << std::endl;
+        } else {
+            std::cout << "Average FPS: no, totalTime=0" << std::endl;
+        }
     }
 
     void SimApp::createSkyboxCubemap() {
@@ -1194,7 +1226,11 @@ namespace cvsim {
     void SimApp::loadSimObjects() {
         nlohmann::json scene;
 
-        std::ifstream file("../assets/simple_scene.json");
+        const std::string path = (!stressCfg_.scenePath.empty()) 
+            ? stressCfg_.scenePath
+            : "../assets/scene_config.json";
+
+        std::ifstream file(path);
         if (!file.is_open()) {
             throw std::runtime_error("Can't open scene_config.json");
         }
@@ -1265,6 +1301,10 @@ namespace cvsim {
             const int side = static_cast<int>(std::ceil(std::cbrt(static_cast<double>(stressCount))));
             const float half = 0.5f * static_cast<float>(side - 1);
 
+            const float stressLightIntensity = 0.1f;
+            const glm::vec3 stressLightColor = {0.1f, 0.1f, 1.0f};
+            const float halfStep = 0.5f * spacing;
+
             int created = 0;
             for (int x = 0; x < side && created < stressCount; ++x) {
                 for (int y = 0; y < side && created < stressCount; ++y) {
@@ -1272,16 +1312,31 @@ namespace cvsim {
                         auto simObj = SimObject::createSimObject();
                         simObj.model = sharedModel;
 
-                        simObj.transform.translation = {
+                        glm::vec3 objPos{
                             (static_cast<float>(x) - half) * spacing,
                             (static_cast<float>(y) - half) * spacing,
                             (static_cast<float>(z) - half) * spacing
                         };
+                        simObj.transform.translation = objPos;
                         simObj.transform.rotation = { 0.0f, 0.0f, 0.0f };
                         simObj.transform.scale = { 1.0f, 1.0f, 1.0f };
 
                         simObjects.emplace(simObj.getId(), std::move(simObj));
                         ++created;
+
+                        auto light = SimObject::makePointLight(stressLightIntensity);
+                        light.color = stressLightColor;
+
+                        float sx = (x < side - 1) ? +halfStep : -halfStep;
+                        float sy = (y < side - 1) ? +halfStep : -halfStep;
+                        float sz = (z < side - 1) ? +halfStep : -halfStep;
+
+                        light.transform.translation = objPos + glm::vec3(sx, sy, sz);
+
+                        simObjects.emplace(light.getId(), std::move(light));
+
+                        ++created;
+
                     }
                 }
             }

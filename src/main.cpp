@@ -10,7 +10,7 @@ static void PrintUsage(const char* exe) {
         << "Examples:\n"
         << "  " << exe << " --stress\n"
         << "  " << exe << " --stress --stress-count 50000 --stress-spacing 1.0\n"
-        << "  " << exe << " --stress --stress-model ../assets/models/tree.obj\n";
+        << "  " << exe << " --scene <path> --stress --stress-model ../assets/models/tree1.obj\n";
 }
 
 int main(int argc, char** argv) {
@@ -22,6 +22,15 @@ int main(int argc, char** argv) {
         if (a == "--help" || a == "-h") {
             PrintUsage(argv[0]);
             return 0;
+        }
+
+        if (a == "--scene") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --scene requires a path\n";
+                return 1;
+            }
+            cfg.scenePath = argv[++i];
+            continue;
         }
         else if (a == "--stress") {
             cfg.enabled = true;

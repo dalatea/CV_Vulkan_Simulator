@@ -25,6 +25,8 @@ namespace cvsim {
 		int count = 50000;
 		float spacing = 2.0f;
 		std::string modelPath; // optional
+
+		std::string scenePath = "../assets/scene_config.json";
 	};
 
 	enum class CameraControlType { Keyboard, ROS };
@@ -126,7 +128,6 @@ namespace cvsim {
 		glm::vec4 sunColor{1.f, 0.95f, 0.7f, 1.f};
 		std::unordered_map<std::string, std::shared_ptr<Model>> modelCache_;
 		std::shared_ptr<Model> getModelCached_(const std::string& modelPath);
-
 
 		std::unique_ptr<DescriptorPool> globalPool{};
 		std::array<FrameCapture, SwapChain::MAX_FRAMES_IN_FLIGHT> captures;

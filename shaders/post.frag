@@ -27,7 +27,7 @@ layout(set = 0, binding = 2) uniform GlobalUbo {
   vec4 sunParams;   // x = sunViewFactor
   vec4 sunScreen;   // xy = sunUV, z = visibility, w = intensityScale
 
-  PointLight pointLights[10];
+  PointLight pointLights[400];
   int numLights;
 
   float autoExposure;

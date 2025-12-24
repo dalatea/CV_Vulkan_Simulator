@@ -9,7 +9,7 @@
 
 namespace enginev {
 
-	#define MAX_LIGHTS 10
+	#define MAX_LIGHTS 400
 
 	struct BrightPushConstant {
 		float threshold = 1.0f;

@@ -21,7 +21,7 @@ layout(std140, set = 0, binding = 0) uniform GlobalUbo {
     vec4 sunParams;
     vec4 sunScreen;
     
-    PointLight pointLights[10];
+    PointLight pointLights[400];
     int numLights;
 
     float autoExposure;
