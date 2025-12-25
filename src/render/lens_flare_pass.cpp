@@ -306,7 +306,6 @@ namespace enginev {
             0, 1, &lensSet,
             0, nullptr);
 
-        // local_size 8x8
         uint32_t gx = (flareExtent_.width + 7) / 8;
         uint32_t gy = (flareExtent_.height + 7) / 8;
 

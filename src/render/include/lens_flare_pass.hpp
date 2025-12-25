@@ -38,23 +38,18 @@ public:
     LensFlarePass(const LensFlarePass&) = delete;
     LensFlarePass& operator=(const LensFlarePass&) = delete;
 
-    // scale обычно 0.5f
     void recreate(VkExtent2D swapExtent, float scale);
     void destroy();
 
-    // Layout helpers для compute-write -> sample-read
     void transitionToGeneral(VkCommandBuffer cmd);
     void transitionToShaderRead(VkCommandBuffer cmd);
 
-    // Запуск compute
     void dispatch(VkCommandBuffer cmd, VkDescriptorSet lensSet);
 
-    // Доступ для post.frag
     VkImageView getFlareView() const { return flareImageView_; }
     VkSampler   getFlareSampler() const { return flareSampler_; }
     VkExtent2D  getExtent() const { return flareExtent_; }
 
-    // Layout для выделения и записи дескрипторов снаружи
     VkDescriptorSetLayout getDescriptorSetLayout() const;
 
 private:
@@ -75,7 +70,6 @@ private:
 
     VkExtent2D flareExtent_{};
 
-    // flare image (storage+sampled)
     VkImage        flareImage_{VK_NULL_HANDLE};
     VkDeviceMemory flareImageMemory_{VK_NULL_HANDLE};
     VkImageView    flareImageView_{VK_NULL_HANDLE};

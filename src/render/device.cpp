@@ -104,7 +104,6 @@ namespace enginev {
         } else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
                    newLayout == VK_IMAGE_LAYOUT_GENERAL) {
 
-            // Для storage image перед compute
             barrier.srcAccessMask = 0;
             barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 
@@ -114,7 +113,6 @@ namespace enginev {
         } else if (oldLayout == VK_IMAGE_LAYOUT_GENERAL &&
                    newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
 
-            // После compute, чтобы можно было сэмплить во фрагменте
             barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -124,7 +122,6 @@ namespace enginev {
         } else if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
                    newLayout == VK_IMAGE_LAYOUT_GENERAL) {
 
-            // Если на следующем кадре снова пишем compute
             barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
             barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 

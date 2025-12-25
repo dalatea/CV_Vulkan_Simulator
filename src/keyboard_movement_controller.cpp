@@ -17,7 +17,6 @@ namespace cvsim {
             gameObject.transform.rotation += lookSpeed * dt * glm::normalize(rotate);
         }
 
-        // limit pitch values between about +/- 85ish degrees
         gameObject.transform.rotation.x = glm::clamp(gameObject.transform.rotation.x, -1.5f, 1.5f);
         gameObject.transform.rotation.y = glm::mod(gameObject.transform.rotation.y, glm::two_pi<float>());
 

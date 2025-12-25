@@ -10,6 +10,5 @@ vec2 positions[3] = vec2[](
 
 void main() {
     gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
-    // преобразуем из clip в uv
     vUV = 0.5 * gl_Position.xy + vec2(0.5);
 }

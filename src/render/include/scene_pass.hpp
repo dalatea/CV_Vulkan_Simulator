@@ -16,16 +16,13 @@ public:
     ScenePass(const ScenePass&) = delete;
     ScenePass& operator=(const ScenePass&) = delete;
 
-    // Создать/пересоздать ресурсы под новый extent
     void recreate(VkExtent2D extent);
 
-    // Освобождение ресурсов (вызывается и из деструктора)
     void destroy();
 
     void begin(VkCommandBuffer cmd);
     void end(VkCommandBuffer cmd);
 
-    // Доступ к ресурсам
     VkRenderPass  getRenderPass()   const { return sceneRenderPass; }
     VkFramebuffer getFramebuffer()  const { return sceneFramebuffer; }
     VkExtent2D    getExtent()       const { return sceneExtent; }

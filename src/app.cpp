@@ -141,7 +141,7 @@ namespace cvsim {
             { -0.040f,  0.050f, 1.0f, 0.020f, 0, 0,0,0 },
         };
 
-        // storage buffer с поверхностями 
+        // storage buffer
         auto lensSurfacesBuffer = std::make_unique<Buffer>(
             device,
             sizeof(enginev::LensSurfaceGPU),
@@ -547,8 +547,6 @@ namespace cvsim {
             }
 
             enginev::Camera& camera = cameras[activeCam].camera;
-            //glm::vec3 cameraPos = camera.getPosition();
-            //glm::vec3 sunVisualPos = cameraPos - lightDir * 10;
 
             if (auto commandBuffer = renderer.beginFrame()) {
                 int frameIndex = renderer.getFrameIndex();
@@ -590,7 +588,6 @@ namespace cvsim {
                     flareSampledInfo.imageView   = lensFlarePass->getFlareView();
                     flareSampledInfo.sampler     = lensFlarePass->getFlareSampler();
 
-                    // bright: scene -> bloomA
                     for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; ++i) {
                         DescriptorWriter(*brightSetLayout, *globalPool)
                             .writeImage(0, &sceneColorInfo)
@@ -696,14 +693,7 @@ namespace cvsim {
                         sunUV.y >= -rUvY && sunUV.y <= 1.0f + rUvY;
                     
                     visibility = intersects ? 1.0f : 0.0f;
-                    //glm::vec3 ndc = glm::vec3(clip) / clip.w;
-
-                    //sunUV = glm::vec2(ndc.x, ndc.y) * 0.5f + glm::vec2(0.5f);
-
-                    //visibility = 1.0;
                 }
-
-                //visibility *= sunFactor;
 
                 ubo.sunScreen = glm::vec4(sunUV, visibility, 1.0f);
 
@@ -712,19 +702,9 @@ namespace cvsim {
                 ubo.sunDirection = glm::vec4(lightDir, 0.f);
                 ubo.sunColor = sunColor;
                 
-                glm::vec3 L = glm::normalize(lightDir); // направление света
-                //glm::vec3 camPos = camera.getPosition();
-                //glm::mat4 invView = glm::inverse(camera.getView());
-                //glm::vec3 forward = glm::normalize(glm::vec3(invView[2]));
-
-                //glm::vec3 center = camPos + forward * 10.f;
-
+                glm::vec3 L = glm::normalize(lightDir); 
                 glm::vec3 center   = glm::vec3(0.0f);
                 glm::vec3 lightPos = center - L * 50.0f;
-
-
-                /*glm::vec3 lightPos = ubo.sunDirection;
-                glm::vec3 center   = glm::vec3(0.0f);*/
 
                 glm::mat4 lightView = glm::lookAtRH(
                     lightPos,
@@ -787,15 +767,6 @@ namespace cvsim {
                 shadowRenderSystem.renderSimObjects(frameInfo);
 
                 vkCmdEndRenderPass(commandBuffer);
-
-                /*renderer.beginSwapChainRenderPass(commandBuffer);
-
-                skyboxRenderSystem.render(frameInfo);
-
-                simpleRenderSystem.renderSimObjects(frameInfo);
-                pointLightSystem.render(frameInfo);
-                
-                renderer.endSwapChainRenderPass(commandBuffer);*/
 
                 scenePass->begin(commandBuffer);
 
@@ -1260,8 +1231,6 @@ namespace cvsim {
         }
         if (scene.contains("sun")) {
             for (auto& sun : scene["sun"]) {
-                //auto sun_obj = SimObject::makePointLight(sun["intensity"], sun["radius"]);
-
                 glm::vec3 color {
                     sun["color"][0].get<float>(),
                     sun["color"][1].get<float>(),
@@ -1345,7 +1314,7 @@ namespace cvsim {
                 << " objects, model=" << modelPath
                 << ", spacing=" << spacing << "\n";
 
-            return; // не грузим обычные objects
+            return; 
         }
 
         if (scene.contains("objects")) {

@@ -26,7 +26,7 @@ void BlurRenderSystem::createPipelineLayout(VkDescriptorSetLayout setLayout) {
     info.pSetLayouts = &setLayout;
 
     VkPushConstantRange push{};
-    push.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // важно!
+    push.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; 
     push.offset = 0;
     push.size = sizeof(BlurPushConstant);
 

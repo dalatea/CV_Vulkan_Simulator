@@ -72,7 +72,6 @@ namespace enginev {
         createSceneFramebuffer();
     }
 
-    // ---------------------- Color target ----------------------
     void ScenePass::createSceneColorTarget(VkExtent2D extent) {
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -129,7 +128,6 @@ namespace enginev {
         }
     }
 
-    // ---------------------- Depth target ----------------------
     void ScenePass::createSceneDepthTarget(VkExtent2D extent) {
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -177,7 +175,7 @@ namespace enginev {
         samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         samplerInfo.anisotropyEnable = VK_FALSE;
-        samplerInfo.compareEnable = VK_FALSE; // читаем как текстуру
+        samplerInfo.compareEnable = VK_FALSE; 
         samplerInfo.unnormalizedCoordinates = VK_FALSE;
         samplerInfo.minLod = 0.0f;
         samplerInfo.maxLod = 0.0f;
@@ -187,7 +185,6 @@ namespace enginev {
         }
     }
 
-    // ---------------------- Scene render pass ----------------------
     void ScenePass::createSceneRenderPass(VkFormat colorFormat, VkFormat depthFormat) {
         VkAttachmentDescription colorAttachment{};
         colorAttachment.format = colorFormat;
@@ -225,7 +222,6 @@ namespace enginev {
 
         std::array<VkSubpassDependency, 2> deps{};
 
-        // before pass: wait for shader reads (если вдруг)
         deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
         deps[0].dstSubpass = 0;
         deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
@@ -236,7 +232,6 @@ namespace enginev {
         deps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
-        // after pass: allow reads in post
         deps[1].srcSubpass = 0;
         deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
         deps[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
@@ -262,7 +257,6 @@ namespace enginev {
         }
     }
 
-    // ---------------------- Scene framebuffer ----------------------
     void ScenePass::createSceneFramebuffer() {
         std::array<VkImageView, 2> attachments = { sceneColorView, sceneDepthView };
 

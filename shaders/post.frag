@@ -61,18 +61,16 @@ vec3 makeGhosts(vec2 uv, vec2 sunUV, vec3 bloomSampleBase) {
 
     vec3 acc = vec3(0.0);
 
-    // позиции по лучу
     float p0 = 0.60;
     float p1 = 0.85;
     float p2 = 0.85;
-    float p3 = 1.15; // может уйти дальше центра
+    float p3 = 1.15; 
 
     vec2 gPos0 = sunUV + dir * p0;
     vec2 gPos1 = sunUV + dir * p1;
     vec2 gPos2 = sunUV + dir * p2;
     vec2 gPos3 = sunUV + dir * p3;
 
-    // размеры дисков
     float r0 = 0.035;
     float r1 = 0.025;
     float r2 = 0.045;
@@ -88,13 +86,11 @@ vec3 makeGhosts(vec2 uv, vec2 sunUV, vec3 bloomSampleBase) {
     float d2 = softDisk(uv, gPos2, r2, s2);
     float d3 = softDisk(uv, gPos3, r3, s3);
 
-    // цвет берём из bloomTex в центре каждого ghost
     vec3 c0 = texture(bloomTex, clamp(gPos0, 0.0, 1.0)).rgb;
     vec3 c1 = texture(bloomTex, clamp(gPos1, 0.0, 1.0)).rgb;
     vec3 c2 = texture(bloomTex, clamp(gPos2, 0.0, 1.0)).rgb;
     vec3 c3 = texture(bloomTex, clamp(gPos3, 0.0, 1.0)).rgb;
 
-    // чуть разный тон — выглядит “линзово”
     vec3 t0 = vec3(1.0, 0.9, 0.8);
     vec3 t1 = vec3(0.8, 0.9, 1.0);
     vec3 t2 = vec3(0.9, 1.0, 0.85);
@@ -113,14 +109,12 @@ void main() {
     vec3 color = texture(sceneColor, uv).rgb;
     //color *= ubo.autoExposure;
 
-    // --- параметры солнца на экране ---
     vec2 sunUV = ubo.sunScreen.xy;
     float vis  = clamp(ubo.sunScreen.z, 0.0, 1.0);
     float scale = max(ubo.sunScreen.w, 0.0);
 
     float viewFactor = clamp(ubo.sunParams.x, 0.0, 1.0);
 
-    // если не смотрим на солнце — выходим без эффекта
     if (vis <= 0.001) {
         outColor = vec4(color, 1.0);
         return;
@@ -145,10 +139,8 @@ void main() {
             sampleUV -= dirToPix * (density / float(NUM_SAMPLES));
             
             float occ = skyMask(sampleUV);
-            // ВОТ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ:
             vec3 s = texture(bloomTex, clamp(sampleUV, 0.0, 1.0)).rgb;
 
-            //rays += s * illuminationDecay * weight;
             rays += s * occ * illuminationDecay * weight;
             illuminationDecay *= decay;
         }
@@ -156,7 +148,6 @@ void main() {
         float falloff = 1.0 - smoothstep(0.0, 0.9, dist);
 
         float coreMask = smoothstep(0.0, 0.015, dist);
-        //rays *= falloff * coreMask * vis * scale * viewFactor * exposure;
         rays *= falloff * coreMask * exposure * vis * scale * viewFactor;
     }
 
@@ -170,8 +161,6 @@ void main() {
     float halo = 1.0 - smoothstep(0.0, 0.15, distSun);
     halo *= smoothstep(0.0, 0.015, distSun);
 
-    //vec3 haloCol = ubo.sunColor.rgb * halo * vis * viewFactor;
- 
     color *= mix(1.0, 1.08, vis * viewFactor);
 
     //vec3 flare = texture(lensFlareTex, vUV).rgb;

@@ -100,7 +100,7 @@ namespace enginev {
         VkAttachmentDescription color{};
         color.format = bloomFormat;
         color.samples = VK_SAMPLE_COUNT_1_BIT;
-        color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; // можно DONT_CARE, но CLEAR ок
+        color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; // пїЅпїЅпїЅпїЅпїЅ DONT_CARE, пїЅпїЅ CLEAR пїЅпїЅ
         color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -190,8 +190,6 @@ namespace enginev {
         }
     }
 
-    // --------- Begin/End helpers (viewport + scissor) ----------
-
     static void setFullscreenViewportScissor(VkCommandBuffer cmd, VkExtent2D extent) {
         VkViewport vp{};
         vp.x = 0.f; vp.y = 0.f;
@@ -234,7 +232,7 @@ namespace enginev {
         VkRenderPassBeginInfo rp{};
         rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rp.renderPass = renderPass;
-        rp.framebuffer = framebufferB; // H пишет в B
+        rp.framebuffer = framebufferB; 
         rp.renderArea.offset = { 0,0 };
         rp.renderArea.extent = extent;
         rp.clearValueCount = 1;
@@ -255,7 +253,7 @@ namespace enginev {
         VkRenderPassBeginInfo rp{};
         rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rp.renderPass = renderPass;
-        rp.framebuffer = framebufferA; // V пишет обратно в A
+        rp.framebuffer = framebufferA; 
         rp.renderArea.offset = { 0,0 };
         rp.renderArea.extent = extent;
         rp.clearValueCount = 1;

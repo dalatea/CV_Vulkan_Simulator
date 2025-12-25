@@ -11,7 +11,6 @@ layout(push_constant) uniform PC {
 } pc;
 
 void main() {
-    // простой гаусс 9 taps
     vec2 ts = pc.texelSize;
     vec3 sum = vec3(0.0);
 
