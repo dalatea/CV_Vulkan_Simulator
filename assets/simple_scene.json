@@ -15,13 +15,6 @@
     },
 
     {
-      "model": "../models/Trees.obj",
-      "position": [-6.0, 0.0, -10.0],
-      "rotation": [0.0, 1.57, 3.14],
-      "scale":    [0.25, 0.25, 0.25]
-    },
-
-    {
       "model": "../models/car.obj",
       "position": [-6.0, 0.0, 0.0],
       "rotation": [0.0, 0.0, 3.14],
