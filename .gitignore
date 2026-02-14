@@ -1,0 +1,5 @@
+*.spv
+
+build/
+
+python_script.txt
