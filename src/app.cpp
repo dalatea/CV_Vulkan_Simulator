@@ -547,6 +547,8 @@ namespace cvsim {
             }
 
             enginev::Camera& camera = cameras[activeCam].camera;
+            glm::mat4 VP = camera.getProjection() * camera.getView();
+            Frustum frustum = extractFrustum(VP);
 
             if (auto commandBuffer = renderer.beginFrame()) {
                 int frameIndex = renderer.getFrameIndex();
@@ -642,6 +644,7 @@ namespace cvsim {
                     globalDescriptorSets[frameIndex], 
                     simObjects};
                 
+                frameInfo.frustum = frustum;
                 GlobalUbo ubo{};
                 ubo.projection = camera.getProjection();
                 ubo.view = camera.getView();

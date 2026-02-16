@@ -2,6 +2,7 @@
 
 #include "camera.hpp"
 #include "object.hpp"
+#include "frustum.hpp"
 
 // lib
 
@@ -74,5 +75,6 @@ namespace enginev {
 		Camera& camera;
 		VkDescriptorSet globalDescriptorSet;
 		SimObject::Map &simObjects;
+		Frustum frustum;
 	};
 }

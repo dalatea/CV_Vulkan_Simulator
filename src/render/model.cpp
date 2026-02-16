@@ -27,7 +27,8 @@ namespace std {
 }
 
 namespace enginev {
-	Model::Model(Device& device, const Model::Builder &builder) : device{device} {
+	Model::Model(Device& device, const Model::Builder &builder, float radius) 
+		: device{device}, boundingRadius(radius) {
 		createVertexBuffers(builder.vertices);
 		createIndexBuffers(builder.indices);
 	}
@@ -38,7 +39,8 @@ namespace enginev {
 		Device& device, const std::string& filepath) {
 		Builder builder{};
 		builder.loadModel(filepath);
-		return std::make_unique<Model>(device, builder);
+
+		return std::make_unique<Model>(device, builder, builder.boundingRadius);
 	}
 
 	std::shared_ptr<Model> Model::createSkyboxCube(Device& device) {
@@ -70,8 +72,18 @@ namespace enginev {
 
 		builder.indices = CUBE_INDICES;
 
-		return std::make_shared<Model>(device, builder);
+		glm::vec3 min(std::numeric_limits<float>::max());
+		glm::vec3 max(std::numeric_limits<float>::lowest());
+		for (const auto& v : builder.vertices) {
+			min = glm::min(min, v.position);
+			max = glm::max(max, v.position);
+		}
+		builder.bboxMin = min;
+		builder.bboxMax = max;
+		glm::vec3 extent = max - min;
+		builder.boundingRadius = glm::length(extent) * 0.5f;
 
+		return std::make_shared<Model>(device, builder, builder.boundingRadius);
 	}
 
 	void Model::createVertexBuffers(const std::vector<Vertex>& vertices) {
@@ -155,6 +167,21 @@ namespace enginev {
 				indices.push_back(uniqueVertices[vertex]);
 			}
 		}
+
+		// расчет bounding box
+		glm::vec3 min(std::numeric_limits<float>::max());
+		glm::vec3 max(std::numeric_limits<float>::lowest());
+
+		for (const auto& v : vertices) {
+			min = glm::min(min, v.position);
+			min = glm::max(max, v.position);
+		}
+
+		bboxMin = min;
+		bboxMax = max;
+
+		glm::vec3 extent = max - min;
+		boundingRadius = glm::length(extent) * 0.5f; 
 	}
 
 	void Model::createIndexBuffers(const std::vector<uint32_t>& indices) {

@@ -9,6 +9,7 @@
 
 #include <vector>
 #include <memory>
+#include <cfloat>
 
 namespace enginev {
 	class Model {
@@ -32,10 +33,14 @@ namespace enginev {
 			std::vector<Vertex> vertices{};
 			std::vector<uint32_t> indices{};
 
+			glm::vec3 bboxMin{};
+			glm::vec3 bboxMax{};
+			float boundingRadius{};
+
 			void loadModel(const std::string& filepath);
 		};
 
-		Model(Device& device, const Model::Builder& builder);
+		Model(Device& device, const Model::Builder& builder, float radius);
 		~Model();
 
 		Model(const Model&) = delete;
@@ -43,6 +48,8 @@ namespace enginev {
 
 		static std::unique_ptr<Model> createModelFromFile(
 			Device& device, const std::string& filepath);
+
+		float boundingRadius = 1.0f;
 
 		void bind(VkCommandBuffer commandBuffer);
 		void draw(VkCommandBuffer commandBuffer);

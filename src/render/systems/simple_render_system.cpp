@@ -5,6 +5,7 @@
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
+#include <glm/gtx/component_wise.hpp>
 
 // std
 #include <array>
@@ -81,6 +82,16 @@ namespace enginev {
         for (auto& kv : frameInfo.simObjects) {
             auto& obj = kv.second;
             if (obj.model == nullptr) continue;
+
+            glm::vec3 worldPos = obj.transform.translation;
+
+            float scaledRadius =
+                obj.model->boundingRadius *
+                glm::compMax(obj.transform.scale);
+            
+            if (!isVisible(frameInfo.frustum, worldPos, scaledRadius))
+                continue;
+
             SimplePushConstantData push{};
             push.modelMatrix = obj.transform.mat4();
             push.normalMatrix = obj.transform.normalMatrix();
