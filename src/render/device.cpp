@@ -258,24 +258,42 @@ namespace enginev {
             queueCreateInfos.push_back(queueCreateInfo);
         }
 
-        VkPhysicalDeviceFeatures deviceFeatures = {};
-        deviceFeatures.samplerAnisotropy = VK_TRUE;
+        VkPhysicalDeviceFeatures2 deviceFeatures2 = {};
+        deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        deviceFeatures2.features.samplerAnisotropy = VK_TRUE;
+
+        VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures = {};
+        rayTracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+        rayTracingFeatures.rayTracingPipeline = VK_TRUE;
+
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR accelFeatures = {};
+        accelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+        accelFeatures.accelerationStructure = VK_TRUE;
+
+        VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures = {};
+        rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+        rayQueryFeatures.rayQuery = VK_TRUE;
 
         VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloatFeatures{};
         atomicFloatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
         atomicFloatFeatures.shaderBufferFloat32Atomics = VK_TRUE;
         atomicFloatFeatures.shaderBufferFloat32AtomicAdd = VK_TRUE;
+
+        deviceFeatures2.pNext = &rayTracingFeatures;
+        rayTracingFeatures.pNext = &accelFeatures;
+        accelFeatures.pNext = &rayQueryFeatures;
+        rayQueryFeatures.pNext = &atomicFloatFeatures;
+
         VkDeviceCreateInfo createInfo = {};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        createInfo.pNext = &deviceFeatures2;
 
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
 
-        createInfo.pEnabledFeatures = &deviceFeatures;
         createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
         createInfo.ppEnabledExtensionNames = deviceExtensions.data();
-
-        createInfo.pNext = &atomicFloatFeatures;
+        createInfo.pEnabledFeatures = nullptr;
 
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
@@ -385,6 +403,7 @@ namespace enginev {
             extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         }
 
+        extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
         return extensions;
     }
 

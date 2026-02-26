@@ -97,6 +97,11 @@ namespace enginev {
             auto& obj = kv.second;
             if (obj.pointLight == nullptr) continue;
 
+            float radius = obj.transform.scale.x;
+
+            if (!isVisible(frameInfo.frustum, obj.transform.translation, radius))
+                continue;
+            
             // calculate distance
             auto offset = frameInfo.camera.getPosition() - obj.transform.translation;
             float disSquared = glm::dot(offset, offset);

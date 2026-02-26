@@ -547,9 +547,7 @@ namespace cvsim {
             }
 
             enginev::Camera& camera = cameras[activeCam].camera;
-            glm::mat4 VP = camera.getProjection() * camera.getView();
-            Frustum frustum = extractFrustum(VP);
-
+        
             if (auto commandBuffer = renderer.beginFrame()) {
                 int frameIndex = renderer.getFrameIndex();
 
@@ -643,8 +641,7 @@ namespace cvsim {
                     camera,
                     globalDescriptorSets[frameIndex], 
                     simObjects};
-                
-                frameInfo.frustum = frustum;
+
                 GlobalUbo ubo{};
                 ubo.projection = camera.getProjection();
                 ubo.view = camera.getView();
@@ -704,7 +701,7 @@ namespace cvsim {
                 
                 ubo.sunDirection = glm::vec4(lightDir, 0.f);
                 ubo.sunColor = sunColor;
-                
+
                 glm::vec3 L = glm::normalize(lightDir); 
                 glm::vec3 center   = glm::vec3(0.0f);
                 glm::vec3 lightPos = center - L * 50.0f;
@@ -722,6 +719,14 @@ namespace cvsim {
 
                 ubo.lightViewProj = lightProj * lightView;
 
+                glm::mat4 VP = camera.getProjection() * camera.getView();
+                Frustum frustum = extractFrustum(VP);
+
+                Frustum shadowFrustum = extractFrustum(ubo.lightViewProj);
+
+                frameInfo.frustum = frustum;
+                frameInfo.shadowFrustum = shadowFrustum;
+                
                 pointLightSystem.update(frameInfo, ubo);
                 uboBuffers[frameIndex]->writeToBuffer(&ubo);
                 uboBuffers[frameIndex]->flush();

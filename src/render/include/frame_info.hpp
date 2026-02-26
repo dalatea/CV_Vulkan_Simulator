@@ -76,5 +76,6 @@ namespace enginev {
 		VkDescriptorSet globalDescriptorSet;
 		SimObject::Map &simObjects;
 		Frustum frustum;
+		Frustum shadowFrustum;
 	};
 }
