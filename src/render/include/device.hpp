@@ -37,6 +37,13 @@ namespace enginev {
 		Device(Device&&) = delete;
 		Device& operator=(Device&&) = delete;
 
+		static PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR;
+		static PFN_vkDestroyAccelerationStructureKHR vkDestroyAccelerationStructureKHR;
+		static PFN_vkGetAccelerationStructureBuildSizesKHR vkGetAccelerationStructureBuildSizesKHR;
+		static PFN_vkCmdBuildAccelerationStructuresKHR vkCmdBuildAccelerationStructuresKHR;
+		static PFN_vkGetAccelerationStructureDeviceAddressKHR vkGetAccelerationStructureDeviceAddressKHR;
+		static void loadRayTracingFunctions(VkDevice device);
+
 		VkCommandPool getCommandPool() { return commandPool; }
 		VkDevice device() { return device_; }
 		VkSurfaceKHR surface() { return surface_; }
@@ -75,6 +82,8 @@ namespace enginev {
 			VkImageLayout newLayout,
 			uint32_t layerCount = 1);
 		VkPhysicalDeviceProperties properties;
+		VkDeviceAddress getBufferDeviceAddress(VkBuffer buffer);
+		VkDeviceAddress getAccelerationStructureDeviceAddress(VkAccelerationStructureKHR as);
 	private:
 		void createInstance();
 		void setupDebugMessenger();
@@ -112,12 +121,15 @@ namespace enginev {
 		const std::vector<const char*> deviceExtensions = { 
 			VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 			VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-			VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+			//VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
 			VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
 			VK_KHR_RAY_QUERY_EXTENSION_NAME,
-			VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
-			VK_KHR_RAY_QUERY_EXTENSION_NAME,
-			VK_KHR_SPIRV_1_4_EXTENSION_NAME
+			//VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
+			VK_KHR_SPIRV_1_4_EXTENSION_NAME,
+			VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME,
+			VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+			VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+			VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME
 		};
 	};
 }

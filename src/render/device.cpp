@@ -7,6 +7,12 @@
 #include <stdexcept>
 
 namespace enginev {
+        PFN_vkCreateAccelerationStructureKHR Device::vkCreateAccelerationStructureKHR = nullptr;
+		PFN_vkDestroyAccelerationStructureKHR Device::vkDestroyAccelerationStructureKHR = nullptr;
+		PFN_vkGetAccelerationStructureBuildSizesKHR Device::vkGetAccelerationStructureBuildSizesKHR = nullptr;
+		PFN_vkCmdBuildAccelerationStructuresKHR Device::vkCmdBuildAccelerationStructuresKHR = nullptr;
+		PFN_vkGetAccelerationStructureDeviceAddressKHR Device::vkGetAccelerationStructureDeviceAddressKHR = nullptr;
+
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
         VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
         VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -33,6 +39,18 @@ namespace enginev {
         }
     }
 
+    void Device::loadRayTracingFunctions(VkDevice device) {
+        vkCreateAccelerationStructureKHR = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
+            vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR"));
+        vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
+            vkGetDeviceProcAddr(device, "vkDestroyAccelerationStructureKHR"));
+        vkGetAccelerationStructureBuildSizesKHR = reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
+            vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR"));
+        vkCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
+            vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR"));
+        vkGetAccelerationStructureDeviceAddressKHR = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
+            vkGetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR"));
+    }
     void Device::transitionImageLayout(
         VkImage image,
         VkFormat format,
@@ -274,6 +292,17 @@ namespace enginev {
         rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
         rayQueryFeatures.rayQuery = VK_TRUE;
 
+        VkPhysicalDeviceBufferDeviceAddressFeaturesKHR bufferAddressFeatures{};
+        bufferAddressFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR;
+        bufferAddressFeatures.bufferDeviceAddress = VK_TRUE;
+
+        VkPhysicalDeviceDescriptorIndexingFeaturesEXT descriptorIndexingFeatures{};
+        descriptorIndexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
+        descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        descriptorIndexingFeatures.runtimeDescriptorArray = VK_TRUE;
+        descriptorIndexingFeatures.descriptorBindingVariableDescriptorCount = VK_TRUE;
+        descriptorIndexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
+
         VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloatFeatures{};
         atomicFloatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
         atomicFloatFeatures.shaderBufferFloat32Atomics = VK_TRUE;
@@ -282,7 +311,9 @@ namespace enginev {
         deviceFeatures2.pNext = &rayTracingFeatures;
         rayTracingFeatures.pNext = &accelFeatures;
         accelFeatures.pNext = &rayQueryFeatures;
-        rayQueryFeatures.pNext = &atomicFloatFeatures;
+        rayQueryFeatures.pNext = &bufferAddressFeatures;
+        bufferAddressFeatures.pNext = &descriptorIndexingFeatures;
+        descriptorIndexingFeatures.pNext = &atomicFloatFeatures;
 
         VkDeviceCreateInfo createInfo = {};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -306,6 +337,8 @@ namespace enginev {
         if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device_) != VK_SUCCESS) {
             throw std::runtime_error("failed to create logical device!");
         }
+
+        loadRayTracingFunctions(device_);
 
         vkGetDeviceQueue(device_, indices.graphicsFamily, 0, &graphicsQueue_);
         vkGetDeviceQueue(device_, indices.presentFamily, 0, &presentQueue_);
@@ -356,6 +389,20 @@ namespace enginev {
             VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         createInfo.pfnUserCallback = debugCallback;
         createInfo.pUserData = nullptr;  // Optional
+    }
+
+    VkDeviceAddress Device::getBufferDeviceAddress(VkBuffer buffer) {
+        VkBufferDeviceAddressInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        info.buffer = buffer;
+        return vkGetBufferDeviceAddress(device_, &info);
+    }
+
+    VkDeviceAddress Device::getAccelerationStructureDeviceAddress(VkAccelerationStructureKHR as) {
+        VkAccelerationStructureDeviceAddressInfoKHR info{};
+        info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+        info.accelerationStructure = as;
+        return Device::vkGetAccelerationStructureDeviceAddressKHR(device_, &info);
     }
 
     void Device::setupDebugMessenger() {

@@ -492,6 +492,12 @@ namespace cvsim {
 
         recreateCaptures();
 
+        for (auto& kv : simObjects) {
+            if (kv.second.model && kv.second.model->blas == VK_NULL_HANDLE) {
+                kv.second.model->buildBlas(device);
+            }
+        }
+
         double fpsWindowTime = 0.0;
         std::uint64_t fpsWindowFrames = 0;
 
@@ -547,7 +553,9 @@ namespace cvsim {
             }
 
             enginev::Camera& camera = cameras[activeCam].camera;
-        
+            glm::mat4 VP = camera.getProjection() * camera.getView();
+            Frustum frustum = extractFrustum(VP);
+
             if (auto commandBuffer = renderer.beginFrame()) {
                 int frameIndex = renderer.getFrameIndex();
 
@@ -641,7 +649,8 @@ namespace cvsim {
                     camera,
                     globalDescriptorSets[frameIndex], 
                     simObjects};
-
+                
+                frameInfo.frustum = frustum;
                 GlobalUbo ubo{};
                 ubo.projection = camera.getProjection();
                 ubo.view = camera.getView();
@@ -701,7 +710,7 @@ namespace cvsim {
                 
                 ubo.sunDirection = glm::vec4(lightDir, 0.f);
                 ubo.sunColor = sunColor;
-
+                
                 glm::vec3 L = glm::normalize(lightDir); 
                 glm::vec3 center   = glm::vec3(0.0f);
                 glm::vec3 lightPos = center - L * 50.0f;
@@ -719,14 +728,6 @@ namespace cvsim {
 
                 ubo.lightViewProj = lightProj * lightView;
 
-                glm::mat4 VP = camera.getProjection() * camera.getView();
-                Frustum frustum = extractFrustum(VP);
-
-                Frustum shadowFrustum = extractFrustum(ubo.lightViewProj);
-
-                frameInfo.frustum = frustum;
-                frameInfo.shadowFrustum = shadowFrustum;
-                
                 pointLightSystem.update(frameInfo, ubo);
                 uboBuffers[frameIndex]->writeToBuffer(&ubo);
                 uboBuffers[frameIndex]->flush();
@@ -808,6 +809,37 @@ namespace cvsim {
                 bloomPass->endBlurV(commandBuffer);
 
                 lensFlarePass->transitionToGeneral(commandBuffer);
+
+                // Уничтожить старый TLAS
+                if (tlas != VK_NULL_HANDLE) {
+                    Device::vkDestroyAccelerationStructureKHR(device.device(), tlas, nullptr);
+                    vkDestroyBuffer(device.device(), tlasBuffer, nullptr);
+                    vkFreeMemory(device.device(), tlasMemory, nullptr);
+                    tlas = VK_NULL_HANDLE;
+                }
+
+                // Построить новый TLAS
+                tlas = buildTlas(tlasBuffer, tlasMemory);
+
+                if (tlas != VK_NULL_HANDLE) {
+                    // Обновить дескрипторный набор для текущего кадра
+                    VkWriteDescriptorSetAccelerationStructureKHR tlasInfo{};
+                    tlasInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+                    tlasInfo.accelerationStructureCount = 1;
+                    tlasInfo.pAccelerationStructures = &tlas;
+
+                    VkWriteDescriptorSet writeSet{};
+                    writeSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    writeSet.pNext = &tlasInfo;
+                    writeSet.dstSet = lensDescriptorSets[frameIndex];
+                    writeSet.dstBinding = 4;   // новый binding
+                    writeSet.dstArrayElement = 0;
+                    writeSet.descriptorCount = 1;
+                    writeSet.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+
+                    vkUpdateDescriptorSets(device.device(), 1, &writeSet, 0, nullptr);
+                }
+
                 lensFlarePass->dispatch(commandBuffer, lensDescriptorSets[frameIndex]);
                 lensFlarePass->transitionToShaderRead(commandBuffer);
 
@@ -879,7 +911,9 @@ namespace cvsim {
             if (c.mem) vkFreeMemory(device.device(), c.mem, nullptr);
             
         }
+        
         vkDeviceWaitIdle(device.device());
+
         if (lensFlarePass) 
         {
             lensFlarePass->destroy();
@@ -891,6 +925,19 @@ namespace cvsim {
 
         destroyShadowResources();
         destroySkyboxCubemap();
+
+        for (auto& kv : simObjects) {
+            if (kv.second.model) {
+                kv.second.model->destroyBlas(device);
+            }
+        }
+
+        if (tlas != VK_NULL_HANDLE) {
+                    Device::vkDestroyAccelerationStructureKHR(device.device(), tlas, nullptr);
+                    vkDestroyBuffer(device.device(), tlasBuffer, nullptr);
+                    vkFreeMemory(device.device(), tlasMemory, nullptr);
+                    tlas = VK_NULL_HANDLE;
+                }
 
         if (totalTime > 0.0) {
             const double avgFps = static_cast<double>(totalFrames) / totalTime;
@@ -1355,4 +1402,126 @@ namespace cvsim {
             }
         }
     }
+
+    VkAccelerationStructureKHR SimApp::buildTlas(VkBuffer& tlasBuffer, VkDeviceMemory& tlasMemory) {
+        std::vector<VkAccelerationStructureInstanceKHR> instances;
+        instances.reserve(simObjects.size());
+
+        uint32_t instanceId = 0;
+        for (auto& kv : simObjects) {
+            auto& obj = kv.second;
+            if (!obj.model || obj.model->blas == VK_NULL_HANDLE) continue;
+
+            VkAccelerationStructureInstanceKHR inst{};
+            inst.instanceCustomIndex = instanceId++;
+            inst.mask = 0xFF;
+            inst.instanceShaderBindingTableRecordOffset = 0;
+            inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+            inst.accelerationStructureReference = device.getAccelerationStructureDeviceAddress(obj.model->blas);
+
+            glm::mat4 m = obj.transform.mat4();
+
+            for (int row = 0; row < 3; ++row) {
+                for (int col = 0; col < 4; ++col) {
+                    inst.transform.matrix[row][col] = m[col][row]; // транспонирование
+                }
+            }
+
+            instances.push_back(inst);
+        }
+
+        if (instances.empty()) {
+            return VK_NULL_HANDLE;
+        }
+
+        Buffer instanceBuffer(device, sizeof(VkAccelerationStructureInstanceKHR), instances.size(),
+                            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        instanceBuffer.map();
+        instanceBuffer.writeToBuffer(instances.data());
+        instanceBuffer.flush();
+
+        VkDeviceAddress instanceAddress = device.getBufferDeviceAddress(instanceBuffer.getBuffer());
+
+        VkAccelerationStructureGeometryKHR geometry{};
+        geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+        geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+        geometry.geometry.instances.arrayOfPointers = VK_FALSE;
+        geometry.geometry.instances.data.deviceAddress = instanceAddress;
+
+        VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+        buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+        buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        buildInfo.geometryCount = 1;
+        buildInfo.pGeometries = &geometry;
+
+        uint32_t instanceCount = instances.size();
+        VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+        sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+        Device::vkGetAccelerationStructureBuildSizesKHR(device.device(),
+                                                VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                                &buildInfo, &instanceCount, &sizeInfo);
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = sizeInfo.accelerationStructureSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        device.createBuffer(
+            bufferInfo.size, 
+            bufferInfo.usage,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 
+            tlasBuffer, 
+            tlasMemory);
+
+        VkAccelerationStructureCreateInfoKHR createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+        createInfo.buffer = tlasBuffer;
+        createInfo.size = sizeInfo.accelerationStructureSize;
+        createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+
+        VkAccelerationStructureKHR tlas;
+        if (Device::vkCreateAccelerationStructureKHR(device.device(), &createInfo, nullptr, &tlas) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create TLAS");
+        }
+
+        VkBuffer scratchBuffer;
+        VkDeviceMemory scratchMemory;
+        VkBufferCreateInfo scratchInfo{};
+        scratchInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        scratchInfo.size = sizeInfo.buildScratchSize;
+        scratchInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        device.createBuffer(
+            scratchInfo.size,
+            scratchInfo.usage,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 
+            scratchBuffer, 
+            scratchMemory);
+
+        VkDeviceAddress scratchAddress = device.getBufferDeviceAddress(scratchBuffer);
+
+        buildInfo.dstAccelerationStructure = tlas;
+        buildInfo.scratchData.deviceAddress = scratchAddress;
+
+        VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+        rangeInfo.primitiveCount = instanceCount;
+        rangeInfo.primitiveOffset = 0;
+        rangeInfo.firstVertex = 0;
+        rangeInfo.transformOffset = 0;
+        const VkAccelerationStructureBuildRangeInfoKHR* pRangeInfo = &rangeInfo;
+
+        VkCommandBuffer cmd = device.beginSingleTimeCommands();
+        Device::vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfo);
+        device.endSingleTimeCommands(cmd);
+
+        vkDestroyBuffer(device.device(), scratchBuffer, nullptr);
+        vkFreeMemory(device.device(), scratchMemory, nullptr);
+
+        return tlas;
+    }
+
+
 }

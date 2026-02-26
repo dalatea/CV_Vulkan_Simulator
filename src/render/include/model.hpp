@@ -51,6 +51,12 @@ namespace enginev {
 
 		float boundingRadius = 1.0f;
 
+		VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
+		VkDeviceMemory blasMemory = VK_NULL_HANDLE;
+		VkBuffer blasBuffer = VK_NULL_HANDLE;
+
+		void buildBlas(Device& device);
+		void destroyBlas(Device& device);
 		void bind(VkCommandBuffer commandBuffer);
 		void draw(VkCommandBuffer commandBuffer);
 		static std::shared_ptr<Model> createSkyboxCube(Device& device);

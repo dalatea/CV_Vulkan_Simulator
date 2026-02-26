@@ -92,6 +92,7 @@ namespace enginev {
 		VkDeviceSize bufferSize = sizeof(vertices[0]) * vertexCount;
 		uint32_t vertexSize = sizeof(vertices[0]);
 
+
 		Buffer stagingBuffer{
 			device,
 			vertexSize,
@@ -107,7 +108,9 @@ namespace enginev {
 			device,
 			vertexSize,
 			vertexCount,
-			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
 		device.copyBuffer(stagingBuffer.getBuffer(), vertexBuffer->getBuffer(), bufferSize);
@@ -210,7 +213,9 @@ namespace enginev {
 			device,
 			indexSize,
 			indexCount,
-			VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
 		device.copyBuffer(stagingBuffer.getBuffer(), indexBuffer->getBuffer(), bufferSize);
@@ -252,4 +257,113 @@ namespace enginev {
 
 		return attributeDescriptions;
 	}
+
+    void Model::buildBlas(Device& device) {
+        if (blas != VK_NULL_HANDLE) return;
+
+        VkBuffer vertexBufferHandle = vertexBuffer->getBuffer();
+        VkBuffer indexBufferHandle = indexBuffer->getBuffer();
+
+        VkDeviceAddress vertexAddress = device.getBufferDeviceAddress(vertexBufferHandle);
+        VkDeviceAddress indexAddress = device.getBufferDeviceAddress(indexBufferHandle);
+
+        VkAccelerationStructureGeometryKHR geometry{};
+        geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        geometry.geometry.triangles.vertexData.deviceAddress = vertexAddress;
+        geometry.geometry.triangles.vertexStride = sizeof(Vertex);
+        geometry.geometry.triangles.maxVertex = vertexCount;
+        geometry.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+        geometry.geometry.triangles.indexData.deviceAddress = indexAddress;
+
+        VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+        buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+        buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        buildInfo.geometryCount = 1;
+        buildInfo.pGeometries = &geometry;
+
+        uint32_t primitiveCount = indexCount / 3;
+        VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+        sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+        Device::vkGetAccelerationStructureBuildSizesKHR(device.device(),
+                                                VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                                &buildInfo, &primitiveCount, &sizeInfo);
+
+        // Создаём буфер для BLAS
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = sizeInfo.accelerationStructureSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        device.createBuffer(
+			bufferInfo.size,
+			bufferInfo.usage,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 
+			blasBuffer, 
+			blasMemory);
+
+        VkAccelerationStructureCreateInfoKHR createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+        createInfo.buffer = blasBuffer;
+        createInfo.size = sizeInfo.accelerationStructureSize;
+        createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+
+        if (Device::vkCreateAccelerationStructureKHR(device.device(), &createInfo, nullptr, &blas) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create BLAS");
+        }
+
+        // Scratch buffer
+        VkBuffer scratchBuffer;
+        VkDeviceMemory scratchMemory;
+        VkBufferCreateInfo scratchInfo{};
+        scratchInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        scratchInfo.size = sizeInfo.buildScratchSize;
+        scratchInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        device.createBuffer(
+			scratchInfo.size,
+			scratchInfo.usage,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 
+			scratchBuffer, 
+			scratchMemory);
+
+        VkDeviceAddress scratchAddress = device.getBufferDeviceAddress(scratchBuffer);
+
+        buildInfo.dstAccelerationStructure = blas;
+        buildInfo.scratchData.deviceAddress = scratchAddress;
+
+        VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+        rangeInfo.primitiveCount = primitiveCount;
+        rangeInfo.primitiveOffset = 0;
+        rangeInfo.firstVertex = 0;
+        rangeInfo.transformOffset = 0;
+        const VkAccelerationStructureBuildRangeInfoKHR* pRangeInfo = &rangeInfo;
+
+        VkCommandBuffer cmd = device.beginSingleTimeCommands();
+        Device::vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfo);
+        device.endSingleTimeCommands(cmd);
+
+        vkDestroyBuffer(device.device(), scratchBuffer, nullptr);
+        vkFreeMemory(device.device(), scratchMemory, nullptr);
+    }
+
+    void Model::destroyBlas(Device& device) {
+        if (blas != VK_NULL_HANDLE) {
+            Device::vkDestroyAccelerationStructureKHR(device.device(), blas, nullptr);
+            blas = VK_NULL_HANDLE;
+        }
+        if (blasBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device.device(), blasBuffer, nullptr);
+            blasBuffer = VK_NULL_HANDLE;
+        }
+        if (blasMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device.device(), blasMemory, nullptr);
+            blasMemory = VK_NULL_HANDLE;
+        }
+    }
 }

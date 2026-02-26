@@ -113,6 +113,7 @@ namespace cvsim {
 		StressConfig stressCfg_{};
 
 		void loadSimObjects();
+		glm::vec3 worldMin, worldMax;
 
 		Window window{ WIDTH, HEIGHT, "CV Sim!" };
 		Device device{ window };
@@ -146,6 +147,11 @@ namespace cvsim {
 		VkDeviceMemory skyboxImageMemory{VK_NULL_HANDLE};
 		VkImageView skyboxImageView{VK_NULL_HANDLE};
 		VkSampler skyboxSampler{VK_NULL_HANDLE};
+		VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
+		VkBuffer tlasBuffer = VK_NULL_HANDLE;
+		VkDeviceMemory tlasMemory = VK_NULL_HANDLE;
+
+		VkAccelerationStructureKHR buildTlas(VkBuffer& tlasBuffer, VkDeviceMemory& tlasMemory);
 
 		void createShadowResources();
 		void destroyShadowResources();
