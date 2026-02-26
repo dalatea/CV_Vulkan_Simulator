@@ -50,6 +50,11 @@ namespace enginev {
             vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR"));
         vkGetAccelerationStructureDeviceAddressKHR = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
             vkGetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR"));
+        if (!vkCreateAccelerationStructureKHR || !vkDestroyAccelerationStructureKHR ||
+            !vkGetAccelerationStructureBuildSizesKHR || !vkCmdBuildAccelerationStructuresKHR ||
+            !vkGetAccelerationStructureDeviceAddressKHR) {
+            throw std::runtime_error("Ray tracing functions not supported by device");
+        }
     }
     void Device::transitionImageLayout(
         VkImage image,
@@ -205,7 +210,7 @@ namespace enginev {
         appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
         appInfo.pEngineName = "No Engine";
         appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-        appInfo.apiVersion = VK_API_VERSION_1_0;
+        appInfo.apiVersion = VK_API_VERSION_1_1;
 
         VkInstanceCreateInfo createInfo = {};
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -362,7 +367,6 @@ namespace enginev {
 
     bool Device::isDeviceSuitable(VkPhysicalDevice device) {
         QueueFamilyIndices indices = findQueueFamilies(device);
-
         bool extensionsSupported = checkDeviceExtensionSupport(device);
 
         bool swapChainAdequate = false;
@@ -374,9 +378,30 @@ namespace enginev {
         VkPhysicalDeviceFeatures supportedFeatures;
         vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
 
+        // Проверка ray query features
+        VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+        rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR accelFeatures{};
+        accelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+        VkPhysicalDeviceBufferDeviceAddressFeaturesKHR bufferAddressFeatures{};
+        bufferAddressFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR;
+
+        VkPhysicalDeviceFeatures2 features2{};
+        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features2.pNext = &rayQueryFeatures;
+        rayQueryFeatures.pNext = &accelFeatures;
+        accelFeatures.pNext = &bufferAddressFeatures;
+
+        vkGetPhysicalDeviceFeatures2(device, &features2);
+
+        bool rayQuerySupported = rayQueryFeatures.rayQuery == VK_TRUE;
+        bool accelSupported = accelFeatures.accelerationStructure == VK_TRUE;
+        bool bufferAddressSupported = bufferAddressFeatures.bufferDeviceAddress == VK_TRUE;
+
         return indices.isComplete() && extensionsSupported && swapChainAdequate &&
-            supportedFeatures.samplerAnisotropy;
+            supportedFeatures.samplerAnisotropy && rayQuerySupported && accelSupported && bufferAddressSupported;
     }
+
 
     void Device::populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo) {
         createInfo = {};
@@ -590,6 +615,13 @@ namespace enginev {
         allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocInfo.allocationSize = memRequirements.size;
         allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+
+        VkMemoryAllocateFlagsInfoKHR allocFlagsInfo{};
+        if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
+            allocFlagsInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO_KHR;
+            allocFlagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR;
+            allocInfo.pNext = &allocFlagsInfo;
+        }
 
         if (vkAllocateMemory(device_, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate vertex buffer memory!");

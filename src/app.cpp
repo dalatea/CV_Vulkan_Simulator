@@ -235,7 +235,7 @@ namespace cvsim {
             .addBinding(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)  // GlobalUbo
             .build();
 
-        auto exposureReduceLayout =
+        /*auto exposureReduceLayout =
             DescriptorSetLayout::Builder(device)
             .addBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT)
             .addBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT)
@@ -246,14 +246,14 @@ namespace cvsim {
             .addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
             .addBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
             .build();
-
+*/
         std::vector<VkDescriptorSet> globalDescriptorSets(SwapChain::MAX_FRAMES_IN_FLIGHT);
         std::vector<VkDescriptorSet> brightDescriptorSets(SwapChain::MAX_FRAMES_IN_FLIGHT);
         std::vector<VkDescriptorSet> blurDescriptorSetsH(SwapChain::MAX_FRAMES_IN_FLIGHT);
         std::vector<VkDescriptorSet> blurDescriptorSetsV(SwapChain::MAX_FRAMES_IN_FLIGHT);
         std::vector<VkDescriptorSet> lensDescriptorSets(SwapChain::MAX_FRAMES_IN_FLIGHT);
-        std::vector<VkDescriptorSet> exposureReduceDescriptorSet(SwapChain::MAX_FRAMES_IN_FLIGHT);
-        std::vector<VkDescriptorSet> exposureUpdateDescriptorSet(SwapChain::MAX_FRAMES_IN_FLIGHT);
+        //std::vector<VkDescriptorSet> exposureReduceDescriptorSet(SwapChain::MAX_FRAMES_IN_FLIGHT);
+        //std::vector<VkDescriptorSet> exposureUpdateDescriptorSet(SwapChain::MAX_FRAMES_IN_FLIGHT);
 
         VkDescriptorImageInfo hdrImageInfo{};
         hdrImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -263,7 +263,7 @@ namespace cvsim {
         auto expDataInfo = exposureData->descriptorInfo();
         auto expStateInfo = exposureState->descriptorInfo();
 
-        VkDescriptorSet exposureReduceSet;
+        /*VkDescriptorSet exposureReduceSet;
         DescriptorWriter(*exposureReduceLayout, *globalPool)
         .writeImage(0, &hdrImageInfo)
         .writeBuffer(1, &expDataInfo)
@@ -274,7 +274,7 @@ namespace cvsim {
         .writeBuffer(0, &expDataInfo)
         .writeBuffer(1, &expStateInfo)
         .build(exposureUpdateSet);
-
+*/
         postDescriptorSets.resize(SwapChain::MAX_FRAMES_IN_FLIGHT);
 
         auto extent = renderer.getSwapChainExtent();
@@ -335,7 +335,7 @@ namespace cvsim {
                 .build(postDescriptorSets[i]);
         }
 
-        for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; i++) {
+        /*for (int i = 0; i < SwapChain::MAX_FRAMES_IN_FLIGHT; i++) {
             DescriptorWriter(*exposureReduceLayout, *globalPool)
                 .writeImage(0, &hdrImageInfo)
                 .writeBuffer(1, &expDataInfo)
@@ -347,7 +347,7 @@ namespace cvsim {
                 .writeBuffer(0, &expDataInfo)
                 .writeBuffer(1, &expStateInfo)
                 .build(exposureUpdateDescriptorSet[i]);
-        }
+        }*/
 
         VkDescriptorImageInfo shadowImageInfo{};
         shadowImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
@@ -434,8 +434,8 @@ namespace cvsim {
             postSetLayout->getDescriptorSetLayout()
         );
 
-        ExposureReduceSystem exposureReduceSystem(device);
-        ExposureUpdateSystem exposureUpdateSystem(device);
+        //ExposureReduceSystem exposureReduceSystem(device);
+        //ExposureUpdateSystem exposureUpdateSystem(device);
 
         std::shared_ptr<Model> skyboxModel = Model::createSkyboxCube(device);
         
@@ -843,11 +843,11 @@ namespace cvsim {
                 lensFlarePass->dispatch(commandBuffer, lensDescriptorSets[frameIndex]);
                 lensFlarePass->transitionToShaderRead(commandBuffer);
 
-                exposureReduceSystem.dispatch(
-                    commandBuffer,
-                    extent,
-                    exposureReduceDescriptorSet[frameIndex]
-                );
+                //exposureReduceSystem.dispatch(
+                //    commandBuffer,
+                //    extent,
+                //    exposureReduceDescriptorSet[frameIndex]
+                //);
 
                 VkMemoryBarrier barrier{};
                 barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -864,10 +864,10 @@ namespace cvsim {
                     0, nullptr
                 );
 
-                exposureUpdateSystem.dispatch(
-                    commandBuffer,
-                    exposureUpdateDescriptorSet[frameIndex]
-                );
+                //exposureUpdateSystem.dispatch(
+                //    commandBuffer,
+                //    exposureUpdateDescriptorSet[frameIndex]
+                //);
 
                 ExposureState cpuExp{};
                 std::memcpy(&cpuExp, exposureState->getMappedMemory(), sizeof(ExposureState));

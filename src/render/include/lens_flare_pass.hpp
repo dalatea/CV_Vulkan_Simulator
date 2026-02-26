@@ -46,6 +46,7 @@ public:
 
     void dispatch(VkCommandBuffer cmd, VkDescriptorSet lensSet);
 
+    VkImage getFlareImage() const { return flareImage_; }
     VkImageView getFlareView() const { return flareImageView_; }
     VkSampler   getFlareSampler() const { return flareSampler_; }
     VkExtent2D  getExtent() const { return flareExtent_; }
