@@ -1,0 +1,37 @@
+#version 450
+
+layout (local_size_x = 1, local_size_y = 1) in;
+
+layout (std430, binding = 0) buffer ExposureData {
+    int logLumSumScaled;
+    int   pixelCount;
+};
+
+layout (std430, binding = 1) buffer ExposureState {
+    float autoExposure;
+    float targetExposure;
+    float adaptionRateUp;
+    float adaptionRateDown;
+    float dt;
+};
+
+const float SCALE = 1048576.0;
+void main()
+{
+    if (pixelCount > 0)
+    {
+        float avgLog = float(logLumSumScaled) / SCALE / float(pixelCount);
+        float avgLum = exp(avgLog);
+
+        targetExposure = 0.18 / max(avgLum, 1e-4);
+
+        float rate = (targetExposure > autoExposure)
+                ? adaptionRateDown
+                : adaptionRateUp;
+
+        autoExposure = mix(autoExposure, targetExposure, 1.0 - exp(-rate * dt));
+
+    }
+    logLumSumScaled = 0;
+    pixelCount = 0;
+}

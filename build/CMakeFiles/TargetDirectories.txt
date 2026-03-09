@@ -1,0 +1,7 @@
+/home/ivan/Simulator/build/CMakeFiles/CV_Simulator.dir
+/home/ivan/Simulator/build/CMakeFiles/uninstall.dir
+/home/ivan/Simulator/build/CMakeFiles/CV_Simulator_uninstall.dir
+/home/ivan/Simulator/build/CMakeFiles/Shaders.dir
+/home/ivan/Simulator/build/CMakeFiles/test.dir
+/home/ivan/Simulator/build/CMakeFiles/edit_cache.dir
+/home/ivan/Simulator/build/CMakeFiles/rebuild_cache.dir

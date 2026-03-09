@@ -1,0 +1,85 @@
+{
+  "objects": [
+    {
+      "model": "../models/room.obj",
+      "position": [0.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 3.14],
+      "scale":    [1.0, 1.0, 1.0]
+    },
+
+    {
+      "model": "../models/quad.obj",
+      "position": [0.0, 0.01, 0.0],
+      "rotation": [0.0, 0.0, 0.0],
+      "scale":    [15.0, 15.0, 15.0]
+    },
+
+    {
+      "model": "../models/car.obj",
+      "position": [-6.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 3.14],
+      "scale":    [1.0, 1.0, 1.0]
+    },
+
+    {
+      "model": "../models/table.obj",
+      "position": [-1.25, -0.2, 3],
+      "rotation": [0.0, 1.57, 3.14],
+      "scale":    [0.5, 0.5, 0.5]
+    },
+
+    {
+      "model": "../models/chair.obj",
+      "position": [-1.25, -0.2, 2.5],
+      "rotation": [0.0, 1.57, 3.14],
+      "scale":    [0.5, 0.5, 0.5]
+    },
+
+    {
+      "model": "../models/sofa.obj",
+      "position": [1.0, -0.2, -2.5],
+      "rotation": [0.0, 1.57, 3.14],
+      "scale":    [0.35, 0.35, 0.35]
+    }
+
+  ],
+
+  "pointLights": [
+    {
+      "color": [1.0, 0.1, 0.1],
+      "intensity": 0.05,
+      "radius": 0.1,
+      "position": [-1.5, -2.0, 3.5]
+    },
+    
+    {
+      "color": [0.1, 0.1, 1.0],
+      "intensity": 0.05,
+      "radius": 0.1,
+      "position": [-1.0, -2.0, 3.5]
+    },
+
+    {
+      "color": [0.1, 1.0, 0.1],
+      "intensity": 0.05,
+      "radius": 0.1,
+      "position": [-1.25, -2.0, 3.5]
+    },
+
+    {
+      "color": [1.0, 1.00, 0.7],
+      "intensity": 0.6,
+      "radius": 0.5,
+      "position": [2.5, -2.5, -2.5]
+    }
+  ],
+
+  "sun": [
+    {
+      "direction": [0, 0.35, 1],
+      "color": [1.0, 0.95, 0.7],
+      "intensity": 0.5,
+      "radius": 10
+    }
+  ]
+}
