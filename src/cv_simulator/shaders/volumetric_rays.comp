@@ -1,0 +1,118 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, rgba16f) uniform image2D godRaysImage;
+layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
+
+// ← Используем существующий GlobalUbo!
+layout(set = 0, binding = 2) uniform GlobalUbo {
+    mat4 projection, view, invView, lightViewProj;
+    vec4 ambientLightColor;
+    vec4 sunDirection;    // ← xyz = направление, w = 0
+    vec4 sunColor;        // ← rgb = цвет, a = интенсивность
+    vec4 sunParams;       // ← x = viewFactor
+    vec4 sunScreen;       // ← xy = UV, z = visibility
+    // ... pointLights и остальное
+} ubo;
+
+// ← Дополнительные параметры через push constants (минимум данных)
+layout(push_constant) uniform PushConstants {
+    vec2 texelSize;      // 1/extent
+    float scatteringCoeff;  // 0.01-0.05
+    float absorptionCoeff;  // 0.001-0.01
+    int numSteps;           // 32-48
+    float maxDistance;      // 50-150
+    float pad0, pad1;
+} pc;
+
+// ----------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------
+vec3 getRayDirection(vec2 uv, mat4 invProj, mat4 invView) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+    vec4 view = invProj * clip;
+    return normalize((invView * vec4(view.xyz, 0.0)).xyz);
+}
+
+// Rayleigh + Mie phase function
+float phaseFunction(vec3 viewDir, vec3 lightDir) {
+    float cosTheta = dot(normalize(viewDir), normalize(lightDir));
+    float rayleigh = 0.3 * (1.0 + cosTheta * cosTheta);
+    float mie = 0.7 * pow(max(0.0, 1.0 - cosTheta), 2.0);
+    return rayleigh + mie;
+}
+
+// ----------------------------------------------------------------
+// Main
+// ----------------------------------------------------------------
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imgSize = imageSize(godRaysImage);
+    if (pix.x >= imgSize.x || pix.y >= imgSize.y) return;
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(imgSize);
+    
+    // Camera ray from existing UBO
+    vec3 rayOrigin = ubo.invView[3].xyz;
+    vec3 rayDir = getRayDirection(uv, ubo.projection, ubo.invView);
+    
+    // Sun data from existing UBO
+    vec3 sunDir = normalize(ubo.sunDirection.xyz);
+    vec3 sunCol = ubo.sunColor.rgb;
+    float sunIntensity = ubo.sunColor.a;
+    float visibility = ubo.sunScreen.z;  // TLAS occlusion result
+    
+    // Early exit if sun not visible
+    if (visibility < 0.01) {
+        imageStore(godRaysImage, pix, vec4(0.0));
+        return;
+    }
+    
+    // Volumetric accumulation
+    vec3 accumulatedLight = vec3(0.0);
+    float transmittance = 1.0;
+    
+    const float STEP_SIZE = 1.0;
+    
+    for (int i = 0; i < pc.numSteps; i++) {
+        float dist = float(i) * STEP_SIZE;
+        vec3 samplePos = rayOrigin + rayDir * dist;
+        
+        // ── Ray tracing: check sun occlusion at sample point ──
+        rayQueryEXT rq;
+        rayQueryInitializeEXT(rq, topLevelAS,
+            gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+            0xFF,
+            samplePos,
+            0.01,
+            sunDir,
+            pc.maxDistance);
+        
+        while (rayQueryProceedEXT(rq)) {}
+        
+        bool occluded = rayQueryGetIntersectionTypeEXT(rq, true) != 
+                       gl_RayQueryCommittedIntersectionNoneEXT;
+        
+        if (!occluded) {
+            // Light reaches this point - compute scattering
+            float phase = phaseFunction(rayDir, sunDir);
+            vec3 lightColor = sunCol * sunIntensity;
+            
+            // Beer-Lambert attenuation
+            float density = exp(-pc.absorptionCoeff * dist);
+            vec3 scattered = lightColor * phase * pc.scatteringCoeff * density;
+            
+            accumulatedLight += scattered * transmittance;
+            transmittance *= exp(-pc.absorptionCoeff * STEP_SIZE);
+        }
+        
+        // Early exit
+        if (transmittance < 0.01) break;
+    }
+    
+    // Apply view factor and visibility from UBO
+    accumulatedLight *= ubo.sunParams.x * visibility;
+    
+    imageStore(godRaysImage, pix, vec4(accumulatedLight, 1.0));
+}
