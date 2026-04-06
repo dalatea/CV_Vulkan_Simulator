@@ -1,5 +1,7 @@
 1.	ROS2
   Установка ROS2 Jazzy для Ubuntu Noble 24.04: https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html
+    1.1 Установка colcon и инструментов сборки
+    sudo apt install -y python3-colcon-common-extensions python3-rosdep2
 2.	Vulkan
    
     2.1 Установка драйвера, если нет
@@ -22,29 +24,36 @@
   
     sudo apt install -y vulkan-validationlayers
   
-4.	Инструменты для работы с бинарным промежуточным языком для графических шейдеров SPIR-V
+3.	Инструменты для работы с бинарным промежуточным языком для графических шейдеров SPIR-V
    
     sudo apt install spirv-tools
   
-6.	GLFW — кроссплатформенная библиотека для создания окон, обработки ввода и графической подсистемой ОС.
+4.	GLFW — кроссплатформенная библиотека для создания окон, обработки ввода и графической подсистемой ОС.
    
     sudo apt install -y libglfw3-dev
   	
-8.	Библиотека линейной алгебры
+5.	Библиотека линейной алгебры
    
     sudo apt install -y libglm-dev
   	
-10.	Библиотека JSON for Modern C++
+6.	Библиотека JSON for Modern C++
     
     sudo apt install -y nlohmann-json3-dev
 
-Перед запуском произвести настройку среды:
+Подключение путей ROS:
 
   source /opt/ros/jazzy/setup.bash
+Сборка проекта осуществляется из корневой директории
+
+colcon build --packages-select cv_simulator --symlink-install
+
+Активация рабочего пространства
+
+source install/setup.bash
 
 Запуск без аргументов отображает сцену scene_config.json из папки assets по умолчанию:
 
-  ./CV_Simulator
+  ros2 run cv_simulator cv_simulator
 
 Аргументы:
 
@@ -64,7 +73,7 @@
 
   -	Стресс-тест
   
-    ./CV_Simulator --stress --stress-count 200 --stress-spacing 1.2 --stress-model ../models/smooth_vase.obj
+    ros2 run cv_simulator cv_simulator --stress --stress-count 200 --stress-spacing 1.2 --stress-model ../models/smooth_vase.obj
   -	Запуск программы с передачей пути к конфигурационному файлу
     
-    ./CV_Simulator –scene ../assets/simple_scene.json
+    ros2 run cv_simulator cv_simulator –scene ../assets/simple_scene.json
