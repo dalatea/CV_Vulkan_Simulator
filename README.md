@@ -73,7 +73,7 @@ source install/setup.bash
 
   -	Стресс-тест
   
-    ros2 run cv_simulator cv_simulator --stress --stress-count 200 --stress-spacing 1.2 --stress-model ../models/smooth_vase.obj
+    ros2 run cv_simulator cv_simulator --stress --stress-count 200 --stress-spacing 1.2 --stress-model src/cv_simulator/assets/models/smooth_vase.obj
   -	Запуск программы с передачей пути к конфигурационному файлу
     
-    ros2 run cv_simulator cv_simulator –scene ../assets/simple_scene.json
+    ros2 run cv_simulator cv_simulator –scene src/cv_simulator/assets/simple_scene.json
