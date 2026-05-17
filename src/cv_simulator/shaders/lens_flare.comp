@@ -1,0 +1,489 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, rgba16f) uniform image2D flareImage;
+
+struct LensSurface {
+    float radius, z, ior, aperture;
+    int   isStop, pad0, pad1, pad2;
+};
+layout(std430, set = 0, binding = 1) readonly buffer LensSurfacesSSBO {
+    LensSurface surfaces[];
+};
+layout(set = 0, binding = 2) uniform LensParams {
+    int   surfaceCount;
+    float sensorZ, sensorW, sensorH;
+    float dustDensity;     
+    float smudgeAmount;   
+    float scratchAmount;    
+    float waterDroplets;    
+    float scatterFactor;    
+
+    float pad0, pad1, pad2;
+} lens;
+struct PointLight { vec4 position, color; };
+layout(set = 0, binding = 3) uniform GlobalUbo {
+    mat4 projection, view, invView, lightViewProj;
+    vec4 ambientLightColor, sunDirection, sunColor, sunParams, sunScreen;
+    PointLight pointLights[400];
+    int numLights; float autoExposure;
+} ubo;
+layout(set = 0, binding = 4) uniform accelerationStructureEXT topLevelAS;
+
+float hash(vec2 p) {
+    vec3 q = fract(vec3(p.xyx) * 0.1031);
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.x + q.y) * q.z);
+}
+
+float fresnelR(float cosA, float n1, float n2) {
+    float r0 = (n1 - n2) / (n1 + n2); r0 *= r0;
+    float x  = 1.0 - cosA;
+    return r0 + (1.0 - r0) * x*x*x*x*x;
+}
+
+bool doRefract(vec3 I, vec3 N, float eta, out vec3 T) {
+    float c  = dot(-I, N);
+    float s2 = eta * eta * (1.0 - c * c);
+    if (s2 > 1.0) return false;
+    T = eta * I + (eta * c - sqrt(1.0 - s2)) * N;
+    return true;
+}
+
+float iorLeft(int k) {
+    if (k <= 0) return 1.0;
+    if (k >= lens.surfaceCount) return 1.0;  
+    return surfaces[k - 1].ior;
+}
+
+float intersectSurf(vec3 ro, vec3 rd, int k) {
+    LensSurface s = surfaces[k];
+
+    if (s.isStop != 0) {
+        if (abs(rd.z) < 1e-4) return -1.0;
+        float t = (s.z - ro.z) / rd.z;
+        if (t <= 0.0 || t > 10.0) return -1.0; 
+        return t > 1e-5 ? t : -1.0;
+    }
+
+    float R   = s.radius;
+    vec3  ctr = vec3(0.0, 0.0, s.z - R);
+    vec3  oc  = ro - ctr;
+    float b   = 2.0 * dot(oc, rd);
+    float cv  = dot(oc, oc) - R * R;
+    float D   = b * b - 4.0 * cv;
+    if (D < 0.0) return -1.0;
+
+    float sq = sqrt(D);
+    float t1 = (-b - sq) * 0.5;
+    float t2 = (-b + sq) * 0.5;
+
+    if (t1 > 1e-5 && t2 > 1e-5) {
+        vec3 h1 = ro + rd * t1, h2 = ro + rd * t2;
+        return abs(h1.z - s.z) < abs(h2.z - s.z) ? t1 : t2;
+    }
+    if (t1 > 1e-5) return t1;
+    if (t2 > 1e-5) return t2;
+    return -1.0;
+}
+
+vec3 surfNormal(vec3 h, int k) {
+    LensSurface s = surfaces[k];
+    if (s.isStop != 0) return vec3(0.0, 0.0, -1.0);
+    return normalize(h - vec3(0.0, 0.0, s.z - s.radius));
+}
+
+const float REFLECT_BOOST = 4.0;
+
+bool interactAt(int k, bool doRefl,
+                inout vec3 ro, inout vec3 rd,
+                inout float ior, inout float thru)
+{
+    LensSurface s = surfaces[k];
+
+    float t = intersectSurf(ro, rd, k);
+
+    if (t < 0.0) return false;
+
+    vec3 h = ro + rd * t;
+    if (length(h.xy) > s.aperture) return false;
+
+    if (s.isStop != 0) { ro = h; return true; }
+
+    vec3  N  = surfNormal(h, k);
+    float c0 = dot(-rd, N);
+
+    vec3 Ni = N;
+    if (c0 < 0.0) { Ni = -N; c0 = -c0; }
+
+    float nxt = (dot(-rd, N) > 0.0) ? iorLeft(k) : s.ior;
+
+    if (doRefl) {
+        thru *= fresnelR(c0, ior, nxt) * REFLECT_BOOST;
+        if (thru < 1e-7) return false;
+        rd = normalize(reflect(rd, Ni));
+        ro = h + rd * 1e-5;
+    } else {
+        float baseRefl = fresnelR(c0, ior, nxt);
+        vec2 hitUV = h.xy / s.aperture * 0.5 + 0.5;
+
+        float surfDust = 0.0;
+        if (lens.dustDensity > 0.0) {
+            vec2 dustCell = floor(hitUV * 30.0 + float(k) * 7.0);
+            float dr = hash(dustCell);
+            if (dr < lens.dustDensity * 0.3) {
+                vec2 dustCenter = (dustCell + vec2(hash(dustCell + 1.0), hash(dustCell + 2.0))) / 30.0;
+                float dd = length(hitUV - dustCenter);
+                float dsize = 0.01 + 0.03 * hash(dustCell + 3.0);
+                surfDust = smoothstep(dsize, dsize * 0.2, dd);
+            }
+        }
+
+        float dropScatter = 0.0;
+        if (lens.waterDroplets > 0.0) {
+            int nDrops = int(lens.waterDroplets * 5.0);
+            for (int di = 0; di < nDrops; ++di) {
+                float dfi = float(di) + float(k) * 13.0;
+                vec2 dropCenter = vec2(hash(vec2(dfi * 1.23, 0.0)) , hash(vec2(0.0, dfi * 4.56)));
+                float dropR = 0.03 + 0.06 * hash(vec2(dfi * 7.89, 0.0));
+                float dd = length(hitUV - dropCenter);
+                if (dd < dropR) {
+                    dropScatter = (1.0 - dd / dropR) * 0.3;
+                    break;
+                }
+            }
+        }
+
+        float dirtLoss = lens.dustDensity * 0.02
+                        + surfDust * 0.15
+                        + lens.smudgeAmount * 0.02;
+        thru *= (1.0 - baseRefl) * (1.0 - dirtLoss);
+
+        if (thru < 1e-5) return false;
+        vec3 T;
+        if (!doRefract(rd, Ni, ior / nxt, T)) return false;
+
+        float totalScatter = lens.scatterFactor * 0.015 + dropScatter;
+        if (totalScatter > 0.0) {
+            vec2 pixSeed = vec2(gl_GlobalInvocationID.xy);
+            float r1 = hash(pixSeed + vec2(float(k) * 3.17, h.x * 100.0));
+            float r2 = hash(pixSeed + vec2(h.y * 100.0, float(k) * 7.31));
+            T = normalize(T + vec3((r1 - 0.5) * totalScatter,
+                                   (r2 - 0.5) * totalScatter,
+                                   0.0));
+        }
+
+        rd  = normalize(T);
+        ro  = h + rd * 1e-5;
+        ior = nxt;
+    }
+    return true;
+}
+
+//  Backward direct trace 
+
+bool traceDirect(vec3 sPt, vec3 aPt, out vec3 exitDir, out float thru)
+{
+    vec3  ro  = sPt;
+    vec3  rd  = normalize(aPt - sPt);   
+    float ior = 1.0;
+    thru = 1.0;
+
+    for (int k = lens.surfaceCount - 1; k >= 0; --k)
+        if (!interactAt(k, false, ro, rd, ior, thru)) return false;
+
+    exitDir = rd;
+    return true;
+}
+
+//  Forward ghost probe
+
+bool traceGhostFwd(vec2 apertXY, vec3 fwdDir, int ri, int rj,
+                   out vec2 sensorPos, out float thruOut)
+{
+    int N = lens.surfaceCount;
+
+    vec3 ro = vec3(apertXY, surfaces[0].z - 0.001);
+    vec3 rd = fwdDir;
+    float ior = 1.0;
+    thruOut = 1.0;
+
+    for (int k = 0; k < rj; ++k)
+        if (!interactAt(k, false, ro, rd, ior, thruOut)) return false;
+
+    if (!interactAt(rj, true, ro, rd, ior, thruOut)) return false;
+    for (int k = rj - 1; k > ri; --k)
+        if (!interactAt(k, false, ro, rd, ior, thruOut)) return false;
+
+    if (!interactAt(ri, true, ro, rd, ior, thruOut)) return false;
+
+    for (int k = ri + 1; k < N; ++k)
+        if (!interactAt(k, false, ro, rd, ior, thruOut)) return false;
+
+    if (abs(rd.z) < 1e-6) return false;
+    float t = (lens.sensorZ - ro.z) / rd.z;
+    if (t <= 0.0) return false;
+
+    sensorPos = (ro + rd * t).xy;
+    return true;
+}
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float hash11(float p) {
+    p = fract(p * 0.1031);
+    p *= p + 33.33;
+    p *= p + p;
+    return fract(p);
+}
+
+float dustParticles(vec2 uv, float density) {
+    if (density <= 0.0) return 0.0;
+    float dust = 0.0;
+
+    vec2 cell = floor(uv * 60.0);
+    float r = hash21(cell);
+    if (r < density * 0.35) {
+        vec2 center = (cell + vec2(hash21(cell + 1.0), hash21(cell + 2.0))) / 60.0;
+        float d = length(uv - center);
+        float size = 0.002 + 0.006 * hash21(cell + 3.0);
+        dust += smoothstep(size, size * 0.2, d) * 0.5;
+    }
+
+    cell = floor(uv * 250.0);
+    r = hash21(cell + 77.0);
+    if (r < density * 0.55) {
+        vec2 center = (cell + vec2(hash21(cell + 11.0), hash21(cell + 22.0))) / 250.0;
+        float d = length(uv - center);
+        float size = 0.0008 + 0.0015 * hash21(cell + 33.0);
+        dust += smoothstep(size, 0.0, d) * 0.25;
+    }
+    return dust;
+}
+
+float scratchPattern(vec2 uv, float amount) {
+    if (amount <= 0.0) return 0.0;
+    float scratch = 0.0;
+    for (int i = 0; i < 6; ++i) {
+        float fi = float(i);
+        if (hash11(fi) > amount * 1.5) continue;
+
+        float angle = hash11(fi * 7.13) * 3.14159;
+        vec2 dir = vec2(cos(angle), sin(angle));
+        vec2 center = vec2(hash11(fi * 3.7 + 0.5), hash11(fi * 5.3 + 0.5));
+
+        float perp = abs(dot(uv - center, vec2(-dir.y, dir.x)));
+        float proj = dot(uv - center, dir);
+        float width = 0.0004 + 0.0008 * hash11(fi * 2.1);
+        float len   = 0.06 + 0.25 * hash11(fi * 4.2);
+
+        if (abs(proj) < len) {
+            scratch += smoothstep(width, 0.0, perp) * 0.2;
+        }
+    }
+    return scratch;
+}
+
+float waterDropPattern(vec2 uv, float amount) {
+    if (amount <= 0.0) return 0.0;
+    float drops = 0.0;
+    int numDrops = int(amount * 12.0);
+    for (int i = 0; i < numDrops; ++i) {
+        float fi = float(i);
+        vec2 center = vec2(hash11(fi * 1.23 + 0.1), hash11(fi * 4.56 + 0.2));
+        float radius = 0.008 + 0.022 * hash11(fi * 7.89);
+        float d = length(uv - center);
+
+        float ring = smoothstep(radius, radius * 0.85, d) -
+                     smoothstep(radius * 0.85, radius * 0.6, d);
+        float fill = smoothstep(radius, 0.0, d) * 0.1;
+        drops += ring * 0.4 + fill;
+    }
+    return drops;
+}
+
+vec2 smudgeDistort(vec2 uv, float amount) {
+    if (amount <= 0.0) return vec2(0.0);
+    float nx = hash21(floor(uv * 15.0)) * 2.0 - 1.0;
+    float ny = hash21(floor(uv * 15.0) + 100.0) * 2.0 - 1.0;
+    return vec2(nx, ny) * amount * 0.008;
+}
+
+void main()
+{
+    ivec2 pix     = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imgSize = imageSize(flareImage);
+    if (pix.x >= imgSize.x || pix.y >= imgSize.y) return;
+
+    imageStore(flareImage, pix, vec4(0.0));
+    float vis = clamp(ubo.sunScreen.z, 0.0, 1.0);
+    float vf  = clamp(ubo.sunParams.x, 0.0, 1.0);
+
+    vec3 camPos = ubo.invView[3].xyz;
+    vec3 fwd    = -normalize(ubo.invView[2].xyz);
+    vec3 right  =  normalize(ubo.invView[0].xyz);
+    vec3 up     =  normalize(ubo.invView[1].xyz);
+
+    vec3 sunDir = normalize(ubo.sunDirection.xyz);
+
+    vec3 sunLoc = normalize(vec3(
+        dot(sunDir, right),
+        dot(sunDir, up),
+        dot(sunDir, fwd)
+    ));
+
+    vec2  uv  = (vec2(pix) + 0.5) / vec2(imgSize);
+    vec2 smudgeOff = smudgeDistort(uv, lens.smudgeAmount);
+    vec2 sensorUV  = uv + smudgeOff;
+
+    float sx  = (sensorUV.x - 0.5) * lens.sensorW;
+    float sy  = (sensorUV.y - 0.5) * lens.sensorH;
+    vec3  sPt = vec3(sx, sy, lens.sensorZ);
+
+    vec3 sunCol = ubo.sunColor.rgb * ubo.sunColor.a;
+    vec3 result = vec3(0.0);
+    int  N      = lens.surfaceCount;
+
+    // direct path
+    {
+        const int S = 12;
+        vec3  acc = vec3(0.0);
+        float w   = 0.0;
+
+        for (int s = 0; s < S; ++s) {
+            float r1 = hash(vec2(pix) + vec2(float(s) * 7.13, 0.37));
+            float r2 = hash(vec2(pix) + vec2(0.91, float(s) * 3.77));
+
+            vec3 aPt = vec3(
+                cos(r1 * 6.2832) * sqrt(r2) * surfaces[0].aperture,
+                sin(r1 * 6.2832) * sqrt(r2) * surfaces[0].aperture,
+                surfaces[0].z
+            );
+
+            vec3  ex; float th;
+            if (!traceDirect(sPt, aPt, ex, th)) continue;
+
+            float aln = dot(-ex, sunLoc);
+            if (aln < 0.92) continue;
+            float aw = smoothstep(0.92, 0.9999, aln);
+
+            float rs  = length(vec2(sx, sy)) / (0.5 * lens.sensorW);
+            vec3  chr = mix(vec3(1.0, 1.0, 1.0),
+                            vec3(0.65, 0.90, 1.40),
+                            clamp(rs, 0.0, 1.0));
+
+            acc += sunCol * th * aw * chr;
+            w   += 1.0;
+        }
+        if (w > 0.0) result += (acc / w) * 0.5;
+    }
+
+    // ghost path
+    vec3 fwdRayDir = normalize(vec3(-sunLoc.x, -sunLoc.y, sunLoc.z));
+
+    if (pix == ivec2(30, 10)) {
+        // Покажем направление луча
+        vec3 debugDir = fwdRayDir * 0.5 + 0.5;  
+        imageStore(flareImage, pix, vec4(debugDir, 1.0));
+        return;
+    }
+    const float GHOST_SCALE = 20.0; 
+
+    const vec3 TINTS[21] = vec3[21](
+        vec3(1.00, 0.55, 0.18), vec3(0.22, 0.72, 1.00),
+        vec3(1.00, 0.95, 0.12), vec3(0.20, 1.00, 0.42),
+        vec3(0.88, 0.18, 1.00), vec3(1.00, 0.32, 0.38),
+        vec3(0.32, 0.62, 1.00), vec3(1.00, 0.78, 0.08),
+        vec3(0.12, 1.00, 0.58), vec3(0.88, 0.12, 0.88),
+        vec3(1.00, 0.48, 0.22), vec3(0.22, 0.92, 1.00),
+        vec3(1.00, 0.22, 0.62), vec3(0.42, 1.00, 0.22),
+        vec3(0.62, 0.32, 1.00), vec3(1.00, 0.82, 0.12),
+        vec3(0.12, 0.62, 1.00), vec3(0.92, 0.22, 0.42),
+        vec3(0.32, 1.00, 0.42), vec3(1.00, 0.38, 0.18),
+        vec3(0.22, 0.52, 1.00)
+    );
+
+    int tidx = 0;
+
+    for (int i = 0; i < N; ++i) {
+        for (int j = i + 1; j < N; ++j, ++tidx) {
+
+            if (surfaces[i].isStop != 0 || surfaces[j].isStop != 0) continue;
+
+            float dIor = abs(surfaces[i].ior - iorLeft(i))
+                       + abs(surfaces[j].ior - iorLeft(j));
+            if (dIor < 0.05) continue;
+
+            vec2  ghostCenter;
+            float ghostThru;
+            if (!traceGhostFwd(vec2(0.0, 0.0), fwdRayDir, i, j,
+                               ghostCenter, ghostThru)) continue;
+            
+            float ghostRadius;
+            {
+                vec2  margPos;
+                float margThru;
+                float probeR = surfaces[0].aperture * 0.7;
+                bool ok = traceGhostFwd(vec2(probeR, 0.0), fwdRayDir, i, j,
+                                        margPos, margThru);
+                if (ok) {
+                    ghostRadius = max(length(margPos - ghostCenter) * 2.0, 0.0012);
+                } else {
+                    ghostRadius = 0.0018;
+                }
+            }
+
+            float dist = length(vec2(sx, sy) - ghostCenter);
+            if (dist > ghostRadius * 4.5) continue;
+
+            float sigma   = max(ghostRadius, 1e-5);
+            float gauss   = exp(-dist * dist / (2.0 * sigma * sigma));
+
+            float sensorArea = lens.sensorW * lens.sensorH;
+            float normFactor = sensorArea / max(6.28318 * sigma * sigma, 1e-8);
+
+            float brightness = ghostThru * gauss * normFactor * GHOST_SCALE;
+
+            float contBoost = 1.0 + lens.scatterFactor * 1.5
+                            + lens.dustDensity * 0.8;
+            brightness *= contBoost;
+
+            result += sunCol * vec3(0.20, 1.00, 0.42) * brightness;
+        }
+    }
+
+    vec2 sunUV = ubo.sunScreen.xy;
+
+    float dust = dustParticles(uv, lens.dustDensity);
+    if (dust > 0.0 && vis > 0.0) {
+        float distSun = length(uv - sunUV);
+        float proximity = exp(-distSun * 4.0);
+        result += sunCol * dust * vf * proximity * 0.6;
+    }
+
+    float scratches = scratchPattern(uv, lens.scratchAmount);
+    if (scratches > 0.0 && vis > 0.0) {
+        result += sunCol * scratches * vf * 0.4;
+    }
+
+    float drops = waterDropPattern(uv, lens.waterDroplets);
+    if (drops > 0.0 && vis > 0.0) {
+        float distSun = length(uv - sunUV);
+        float proximity = exp(-distSun * 3.0);
+        result += sunCol * drops * vf * proximity * 0.8;
+    }
+
+    if (lens.scatterFactor > 0.0 && vis > 0.0) {
+        float distSun = length(uv - sunUV);
+        float haze = exp(-distSun * distSun * 8.0) * lens.scatterFactor;
+        result += sunCol * haze * vf * 0.3;
+    }
+
+    result *= vis * vf;
+    imageStore(flareImage, pix, vec4(result, 1.0));
+}

@@ -1,0 +1,156 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, rgba16f) uniform image2D godRaysImage;
+layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
+
+struct PointLight { vec4 position; vec4 color; };
+layout(set = 0, binding = 2) uniform GlobalUbo {
+  mat4 projection;
+  mat4 view;
+  mat4 invView;
+  mat4 lightViewProj;
+  
+  vec4 ambientLightColor; 
+  
+  vec4 sunDirection;
+  vec4 sunColor;
+  
+  vec4 sunParams;
+  vec4 sunScreen;
+
+  PointLight pointLights[400];
+  int numLights;
+
+  float autoExposure;
+} ubo;
+
+layout(push_constant) uniform PushConstants {
+    vec2  texelSize;
+    float scatteringCoeff;
+    float absorptionCoeff;
+    int   numSteps;
+    float maxDistance;
+    float dustDensity;     
+    float scatterFactor;    
+} pc;
+
+vec3 getRayDirection(vec2 uv, mat4 invProj, mat4 invView) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+    vec4 view = invProj * clip;
+    return normalize((invView * vec4(view.xyz, 0.0)).xyz);
+}
+
+float phaseFunction(vec3 viewDir, vec3 lightDir) {
+    float cosTheta = dot(normalize(viewDir), normalize(lightDir));
+    float rayleigh = 0.3 * (1.0 + cosTheta * cosTheta);
+    float mie = 0.7 * pow(max(0.0, 1.0 - cosTheta), 2.0);
+    return rayleigh + mie;
+}
+
+float henyeyGreenstein(float cosTheta, float g) {
+    float g2 = g * g;
+    float denom = 1.0 + g2 - 2.0 * g * cosTheta;
+    return (1.0 - g2) / (4.0 * 3.14159 * pow(denom, 1.5));
+}
+
+float dustPhaseFunction(vec3 viewDir, vec3 lightDir, float dustAmount) {
+    float cosTheta = dot(normalize(viewDir), normalize(lightDir));
+    float cleanPhase = phaseFunction(viewDir, lightDir);
+
+    if (dustAmount <= 0.0) return cleanPhase;
+
+    float dustFwd  = henyeyGreenstein(cosTheta, 0.7) * 0.8;
+    float dustBack = henyeyGreenstein(cosTheta, -0.3) * 0.2;
+    float dustPhase = dustFwd + dustBack;
+
+    return mix(cleanPhase, dustPhase * 2.0, dustAmount);
+}
+
+float hash31(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float dustDensityAtPoint(vec3 worldPos, float baseDensity) {
+    if (baseDensity <= 0.0) return 0.0;
+
+    float largeDust = hash31(floor(worldPos * 0.5)) * 0.5 + 0.5;
+    float smallDust = hash31(floor(worldPos * 3.0) + 100.0) * 0.3 + 0.7;
+    float heightFade = exp(-max(worldPos.y - 5.0, 0.0) * 0.1);
+
+    return baseDensity * largeDust * smallDust * heightFade;
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imgSize = imageSize(godRaysImage);
+    if (pix.x >= imgSize.x || pix.y >= imgSize.y) return;
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(imgSize);
+
+    vec3 rayOrigin = ubo.invView[3].xyz;
+    vec3 rayDir = getRayDirection(uv, ubo.projection, ubo.invView);
+    
+    vec3 sunDir = normalize(ubo.sunDirection.xyz);
+    vec3 sunCol = ubo.sunColor.rgb;
+    float sunIntensity = ubo.sunColor.a;
+    float visibility = ubo.sunScreen.z;  
+    
+    if (visibility < 0.01) {
+        imageStore(godRaysImage, pix, vec4(0.0));
+        return;
+    }
+    
+    vec3 accumulatedLight = vec3(0.0);
+    float transmittance = 1.0;
+    
+    const float STEP_SIZE = 1.0;
+
+    float dustBoost = pc.dustDensity * 0.04 + pc.scatterFactor * 0.03;
+    float effectiveScattering = pc.scatteringCoeff + dustBoost;
+    float effectiveAbsorption = pc.absorptionCoeff + pc.dustDensity * 0.002;
+    
+    
+    for (int i = 0; i < pc.numSteps; i++) {
+        float dist = float(i) * STEP_SIZE;
+        vec3 samplePos = rayOrigin + rayDir * dist;
+        
+        rayQueryEXT rq;
+        rayQueryInitializeEXT(rq, topLevelAS,
+            gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+            0xFF,
+            samplePos,
+            0.01,
+            sunDir,
+            pc.maxDistance);
+        
+        while (rayQueryProceedEXT(rq)) {}
+        
+        bool occluded = rayQueryGetIntersectionTypeEXT(rq, true) != 
+                       gl_RayQueryCommittedIntersectionNoneEXT;
+        
+        if (!occluded) {
+            float phase = dustPhaseFunction(rayDir, sunDir, pc.dustDensity);
+            vec3 lightColor = sunCol * sunIntensity;
+            
+            float density = exp(-effectiveAbsorption * dist);
+            float localDust = dustDensityAtPoint(samplePos, pc.dustDensity);
+            float localScatter = effectiveScattering + localDust * 0.02;
+            
+            vec3 scattered = lightColor * phase * localScatter * density;
+            
+            accumulatedLight += scattered * transmittance;
+            transmittance *= exp(-effectiveAbsorption * STEP_SIZE);
+        }
+        
+        // Early exit
+        if (transmittance < 0.01) break;
+    }
+    
+    accumulatedLight *= ubo.sunParams.x * visibility;
+    
+    imageStore(godRaysImage, pix, vec4(accumulatedLight, 1.0));
+}
